@@ -1,0 +1,9 @@
+{
+  "access_key_id": "YANDEX_ACCESS_KEY_ID",
+  "secret_key": "YANDEX_SECRET_KEY",
+  "bucket": "my-bucket",
+  "prefix": "incoming",
+  "endpoint": "https://storage.yandexcloud.net",
+  "region": "ru-central1"
+}
+

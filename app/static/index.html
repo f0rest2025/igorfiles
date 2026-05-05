@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Yandex Object Storage Manager</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>Yandex Object Storage Manager</h1>
+      <p id="health">Проверка сервиса...</p>
+    </div>
+    <div class="config-path" id="config-path"></div>
+  </header>
+
+  <main class="layout">
+    <nav class="tabs" aria-label="Разделы">
+      <button class="tab active" data-tab="connection">Подключение</button>
+      <button class="tab" data-tab="files">Файлы</button>
+      <button class="tab" data-tab="upload-link">Ссылка на загрузку</button>
+      <button class="tab" data-tab="download-link">Ссылка на скачивание</button>
+      <button class="tab" data-tab="direct-upload">Прямая загрузка</button>
+    </nav>
+
+    <section id="connection" class="panel active">
+      <div class="grid two">
+        <label>Access Key ID
+          <input id="access-key-id" autocomplete="off">
+        </label>
+        <label>Secret Key
+          <input id="secret-key" type="password" autocomplete="off" placeholder="Оставьте пустым, чтобы не менять сохранённый ключ">
+        </label>
+        <label>Bucket
+          <input id="bucket" autocomplete="off">
+        </label>
+        <label>Prefix
+          <input id="prefix" autocomplete="off" placeholder="incoming">
+        </label>
+        <label>Endpoint
+          <input id="endpoint" autocomplete="off">
+        </label>
+        <label>Region
+          <input id="region" autocomplete="off">
+        </label>
+      </div>
+      <div class="actions">
+        <button id="test-config">Проверить подключение</button>
+        <button id="apply-config" class="secondary">Применить</button>
+        <button id="save-config" class="secondary">Сохранить локально</button>
+        <button id="clear-config" class="danger">Очистить</button>
+      </div>
+      <div id="connection-status" class="status"></div>
+    </section>
+
+    <section id="files" class="panel">
+      <div class="toolbar">
+        <label>Prefix
+          <input id="files-prefix" placeholder="По умолчанию из подключения">
+        </label>
+        <label>Поиск
+          <input id="files-search" placeholder="Имя объекта">
+        </label>
+        <label>Сортировка
+          <select id="files-sort">
+            <option value="date-desc">Дата: новые сверху</option>
+            <option value="date-asc">Дата: старые сверху</option>
+            <option value="name-asc">Имя: A-Z</option>
+            <option value="name-desc">Имя: Z-A</option>
+            <option value="size-desc">Размер: больше сверху</option>
+            <option value="size-asc">Размер: меньше сверху</option>
+          </select>
+        </label>
+        <button id="refresh-files">Обновить</button>
+      </div>
+      <div id="files-status" class="status"></div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Object key</th>
+              <th>Размер</th>
+              <th>Дата изменения</th>
+              <th>Storage class</th>
+              <th>ETag</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="files-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="upload-link" class="panel">
+      <div class="grid two">
+        <label>Имя файла / object key
+          <input id="upload-name" placeholder="client-file.pdf">
+        </label>
+        <label>Prefix
+          <input id="upload-prefix" placeholder="По умолчанию из подключения">
+        </label>
+        <label>Срок жизни, секунд
+          <input id="upload-expires" type="number" min="60" max="604800" value="3600">
+        </label>
+        <label>Content-Type
+          <input id="upload-content-type" placeholder="application/pdf">
+        </label>
+        <label>Ожидаемый тип файла
+          <input id="upload-expected-type" placeholder="Необязательно">
+        </label>
+      </div>
+      <div class="checks">
+        <label><input id="upload-guid" type="checkbox" checked> Добавить GUID к имени</label>
+        <label><input id="upload-sanitize" type="checkbox" checked> Санитизировать имя</label>
+      </div>
+      <div class="actions">
+        <button id="generate-upload">Сгенерировать</button>
+      </div>
+      <div id="upload-status" class="status"></div>
+      <div id="upload-result" class="result hidden">
+        <label>Итоговый object key
+          <div class="copyline"><input id="upload-object-key" readonly><button data-copy="upload-object-key">Копировать</button></div>
+        </label>
+        <label>Клиентская HTML-ссылка для браузера
+          <textarea id="upload-data-url" readonly rows="4"></textarea>
+          <button data-copy="upload-data-url">Копировать HTML-ссылку</button>
+        </label>
+        <label>Локальная страница через это приложение
+          <div class="copyline"><input id="upload-client-url" readonly><button data-copy="upload-client-url">Копировать</button></div>
+        </label>
+        <label>Raw pre-signed PUT URL
+          <textarea id="upload-url" readonly rows="4"></textarea>
+          <button data-copy="upload-url">Копировать raw URL</button>
+        </label>
+      </div>
+    </section>
+
+    <section id="download-link" class="panel">
+      <div class="grid two">
+        <label>Object key
+          <input id="download-object-key" placeholder="Выберите файл из списка или введите вручную">
+        </label>
+        <label>Срок жизни, секунд
+          <input id="download-expires" type="number" min="60" max="604800" value="3600">
+        </label>
+      </div>
+      <div class="actions">
+        <button id="generate-download">Сгенерировать download-ссылку</button>
+        <button id="open-download" class="secondary" disabled>Открыть</button>
+      </div>
+      <div id="download-status" class="status"></div>
+      <div id="download-result" class="result hidden">
+        <label>Download URL
+          <textarea id="download-url" readonly rows="4"></textarea>
+          <button data-copy="download-url">Копировать ссылку</button>
+        </label>
+      </div>
+    </section>
+
+    <section id="direct-upload" class="panel">
+      <div class="grid two">
+        <label>Файл
+          <input id="direct-file" type="file">
+        </label>
+        <label>Prefix
+          <input id="direct-prefix" placeholder="По умолчанию из подключения">
+        </label>
+        <label>Итоговое имя объекта
+          <input id="direct-object-name" placeholder="По умолчанию имя файла">
+        </label>
+      </div>
+      <div class="checks">
+        <label><input id="direct-guid" type="checkbox"> Добавить GUID к имени</label>
+        <label><input id="direct-sanitize" type="checkbox" checked> Санитизировать имя</label>
+      </div>
+      <div class="actions">
+        <button id="direct-upload-button">Загрузить</button>
+        <button id="direct-show-files" class="secondary" disabled>Показать в списке файлов</button>
+      </div>
+      <div id="direct-status" class="status"></div>
+      <div id="direct-result" class="result hidden">
+        <label>Object key
+          <div class="copyline"><input id="direct-object-key" readonly><button data-copy="direct-object-key">Копировать</button></div>
+        </label>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
+

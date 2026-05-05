@@ -1,0 +1,79 @@
+from datetime import datetime
+
+import pytest
+from botocore.exceptions import ClientError
+
+from app.config import AppConfig
+from app.storage import StorageError, YandexStorageClient
+
+
+class FakeClient:
+    def generate_presigned_url(self, operation, Params, ExpiresIn, HttpMethod):
+        return f"https://storage.example/{Params['Bucket']}/{Params['Key']}?op={operation}&ttl={ExpiresIn}&method={HttpMethod}"
+
+    def head_bucket(self, Bucket):
+        return {}
+
+    def get_paginator(self, name):
+        assert name == "list_objects_v2"
+        return self
+
+    def paginate(self, Bucket, Prefix):
+        return [
+            {
+                "Contents": [
+                    {
+                        "Key": f"{Prefix}/file.txt",
+                        "Size": 12,
+                        "LastModified": datetime(2026, 1, 1),
+                        "StorageClass": "STANDARD",
+                        "ETag": '"abc"',
+                    }
+                ]
+            }
+        ]
+
+
+def configured_client(monkeypatch):
+    client = YandexStorageClient(
+        AppConfig(
+            access_key_id="access",
+            secret_key="secret",
+            bucket="bucket",
+            endpoint="https://storage.yandexcloud.net",
+            region="ru-central1",
+        )
+    )
+    monkeypatch.setattr(client, "_client", lambda: FakeClient())
+    return client
+
+
+def test_presign_upload_uses_put_object(monkeypatch):
+    client = configured_client(monkeypatch)
+    url = client.presign_upload("incoming/file.txt", 600, "text/plain")
+    assert "op=put_object" in url
+    assert "ttl=600" in url
+    assert "method=PUT" in url
+
+
+def test_list_objects_maps_response(monkeypatch):
+    client = configured_client(monkeypatch)
+    objects = client.list_objects("incoming")
+    assert objects[0].key == "incoming/file.txt"
+    assert objects[0].size == 12
+    assert objects[0].etag == "abc"
+
+
+def test_connection_error_is_safe(monkeypatch):
+    client = configured_client(monkeypatch)
+
+    class FailingClient(FakeClient):
+        def head_bucket(self, Bucket):
+            raise ClientError({"Error": {"Code": "403", "Message": "Forbidden"}}, "HeadBucket")
+
+    monkeypatch.setattr(client, "_client", lambda: FailingClient())
+    with pytest.raises(StorageError) as exc_info:
+        client.test_connection()
+    assert "Forbidden" in str(exc_info.value)
+    assert "secret" not in str(exc_info.value)
+
