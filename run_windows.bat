@@ -1,4 +1,3 @@
 @echo off
 setlocal
-python -m uvicorn app.main:app --host 127.0.0.1 --port 8765
-
+python -m app
