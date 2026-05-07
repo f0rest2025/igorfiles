@@ -24,6 +24,15 @@ class DownloadToken:
     used: bool = False
 
 
+@dataclass(slots=True)
+class LegacyBrowserUploadToken:
+    token: str
+    upload_url: str
+    content_type: str
+    expected_file_type: str
+    expires_at: datetime
+
+
 class UploadTokenStore:
     def __init__(self) -> None:
         self._tokens: dict[str, UploadToken] = {}
@@ -105,3 +114,36 @@ class DownloadTokenStore:
         for token in expired:
             self._tokens.pop(token, None)
 
+
+class LegacyBrowserUploadStore:
+    def __init__(self) -> None:
+        self._tokens: dict[str, LegacyBrowserUploadToken] = {}
+
+    def create(self, upload_url: str, expires_in: int, content_type: str = "", expected_file_type: str = "") -> LegacyBrowserUploadToken:
+        self.cleanup()
+        token = secrets.token_urlsafe(32)
+        record = LegacyBrowserUploadToken(
+            token=token,
+            upload_url=upload_url,
+            content_type=content_type,
+            expected_file_type=expected_file_type,
+            expires_at=datetime.now(UTC) + timedelta(seconds=expires_in),
+        )
+        self._tokens[token] = record
+        return record
+
+    def get(self, token: str) -> LegacyBrowserUploadToken | None:
+        self.cleanup()
+        record = self._tokens.get(token)
+        if record is None:
+            return None
+        if record.expires_at <= datetime.now(UTC):
+            self._tokens.pop(token, None)
+            return None
+        return record
+
+    def cleanup(self) -> None:
+        now = datetime.now(UTC)
+        expired = [token for token, record in self._tokens.items() if record.expires_at <= now]
+        for token in expired:
+            self._tokens.pop(token, None)

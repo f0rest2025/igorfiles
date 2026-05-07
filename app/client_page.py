@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import html
 import json
 
@@ -102,13 +101,14 @@ def render_local_upload_page(token: str, expires_at: str) -> str:
 </html>"""
 
 
-def build_data_upload_url(upload_url: str, content_type: str = "", expected_file_type: str = "") -> str:
+def render_presigned_upload_page(upload_url: str, content_type: str = "", expected_file_type: str = "", expires_at: str = "") -> str:
     payload = {
         "uploadUrl": upload_url,
         "contentType": content_type,
         "expectedFileType": expected_file_type,
     }
-    html_page = f"""<!doctype html>
+    escaped_expires_at = html.escape(expires_at, quote=True)
+    return f"""<!doctype html>
 <html lang="ru">
 <head>
   <meta charset="utf-8">
@@ -124,9 +124,11 @@ def build_data_upload_url(upload_url: str, content_type: str = "", expected_file
     input[type=file] {{ width: 100%; border: 1px solid var(--border); border-radius: 6px; padding: 12px; background: #fff; }}
     button {{ margin-top: 16px; width: 100%; min-height: 44px; border: 0; border-radius: 6px; background: var(--accent); color: #fff; font-weight: 650; cursor: pointer; }}
     button:disabled {{ opacity: .55; cursor: wait; }}
+    progress {{ width: 100%; height: 12px; margin-top: 14px; }}
     .status {{ min-height: 22px; margin-top: 14px; font-size: 14px; }}
     .ok {{ color: var(--ok); }}
     .err {{ color: var(--err); }}
+    small {{ display: block; margin-top: 16px; color: var(--muted); }}
   </style>
 </head>
 <body>
@@ -136,7 +138,9 @@ def build_data_upload_url(upload_url: str, content_type: str = "", expected_file
     <form id="upload-form">
       <input id="file" type="file" required>
       <button id="submit" type="submit">Загрузить</button>
+      <progress id="progress" value="0" max="100" hidden></progress>
       <div id="status" class="status"></div>
+      <small>Ссылка действует до {escaped_expires_at}</small>
     </form>
   </main>
   <script>
@@ -145,6 +149,7 @@ def build_data_upload_url(upload_url: str, content_type: str = "", expected_file
     const fileInput = document.getElementById('file');
     const submit = document.getElementById('submit');
     const statusBox = document.getElementById('status');
+    const progress = document.getElementById('progress');
     form.addEventListener('submit', async (event) => {{
       event.preventDefault();
       const file = fileInput.files[0];
@@ -155,20 +160,39 @@ def build_data_upload_url(upload_url: str, content_type: str = "", expected_file
         return;
       }}
       submit.disabled = true;
+      progress.hidden = false;
+      progress.value = 0;
       statusBox.className = 'status';
       statusBox.textContent = 'Загрузка...';
       const headers = {{}};
       if (config.contentType) headers['Content-Type'] = config.contentType;
-      try {{
-        const response = await fetch(config.uploadUrl, {{ method: 'PUT', body: file, headers }});
-        if (!response.ok) throw new Error('Object Storage вернул HTTP ' + response.status);
+      const xhr = new XMLHttpRequest();
+      xhr.open('PUT', config.uploadUrl);
+      for (const [name, value] of Object.entries(headers)) xhr.setRequestHeader(name, value);
+      xhr.upload.onprogress = (event) => {{
+        if (!event.lengthComputable) return;
+        const percent = Math.round((event.loaded / event.total) * 100);
+        progress.value = percent;
+        statusBox.textContent = 'Загрузка: ' + percent + '%';
+      }};
+      xhr.onload = () => {{
+        if (xhr.status < 200 || xhr.status >= 300) {{
+          fail(new Error('Object Storage вернул HTTP ' + xhr.status));
+          return;
+        }}
+        progress.value = 100;
         statusBox.className = 'status ok';
         statusBox.textContent = 'Файл загружен.';
         fileInput.value = '';
-      }} catch (error) {{
+        submit.disabled = false;
+      }};
+      xhr.onerror = () => fail(new Error('NetworkError при прямой загрузке. Проверьте CORS bucket для origin ' + window.location.origin + ', метода PUT и заголовка Content-Type.'));
+      xhr.ontimeout = () => fail(new Error('timeout during upload'));
+      xhr.send(file);
+      function fail(error) {{
+        progress.hidden = true;
         statusBox.className = 'status err';
-        statusBox.textContent = error.message + '. Для прямой браузерной загрузки bucket должен разрешать CORS для PUT.';
-      }} finally {{
+        statusBox.textContent = error.message;
         submit.disabled = false;
       }}
     }});
@@ -181,5 +205,3 @@ def build_data_upload_url(upload_url: str, content_type: str = "", expected_file
   </script>
 </body>
 </html>"""
-    encoded = base64.b64encode(html_page.encode("utf-8")).decode("ascii")
-    return f"data:text/html;charset=utf-8;base64,{encoded}"

@@ -55,6 +55,8 @@ http://127.0.0.1:8765/upload/<token>
 
 Важно: если клиент находится не на компьютере оператора, `public_base_url` должен указывать на адрес, по которому клиент реально видит локальный backend: LAN IP, VPN/tunnel или reverse proxy. По умолчанию backend слушает `127.0.0.1:8765`.
 
+Legacy direct browser upload больше не отдаётся как `data:` URL. Для presigned PUT приложение создаёт локальную страницу `/legacy-upload/<token>`, чтобы browser origin был `public_base_url`, а не `null`. Если используете legacy browser upload, CORS bucket должен разрешать именно origin из `public_base_url`, метод `PUT` и заголовок `Content-Type`.
+
 ## Большие файлы
 
 Загрузка в Object Storage идёт через `boto3` multipart transfer:
@@ -99,14 +101,14 @@ Operator direct upload не читает весь файл в память. Clie
 
 ```bash
 git push origin main
-git tag v0.4.2
-git push origin v0.4.2
+git tag v0.4.3
+git push origin v0.4.3
 ```
 
 После сборки в GitHub Releases появится:
 
 ```text
-YandexStorageManagerSetup-0.4.2.exe
+YandexStorageManagerSetup-0.4.3.exe
 ```
 
 ## Запуск из исходников
@@ -250,7 +252,7 @@ pytest
 - static access key fields;
 - `boto3` legacy backend;
 - presigned PUT/GET generation;
-- legacy `data:` HTML upload page.
+- local `/legacy-upload/<token>` page для presigned PUT compatibility.
 
 Новый основной сценарий desktop GUI не отдаёт клиенту presigned PUT URL и не требует static access key.
 Встроенная авторизация пользователей приложения удалена: приложение открывается сразу, без логина и пароля.

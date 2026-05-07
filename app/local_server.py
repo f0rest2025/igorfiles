@@ -8,12 +8,12 @@ import uvicorn
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, Response
 
-from app.client_page import render_local_upload_page
+from app.client_page import render_local_upload_page, render_presigned_upload_page
 from app.config import AppConfig
 from app.diagnostics import get_logger
 from app.storage import StorageError, YandexStorageClient
 from app.upload_temp import EmptyUploadError, UploadTooLargeError, save_upload_to_temp
-from app.upload_tokens import DownloadTokenStore, UploadTokenStore
+from app.upload_tokens import DownloadTokenStore, LegacyBrowserUploadStore, UploadTokenStore
 
 
 logger = get_logger(__name__)
@@ -24,6 +24,7 @@ class LocalServerState:
     config_provider: Callable[[], AppConfig]
     uploads: UploadTokenStore = field(default_factory=UploadTokenStore)
     downloads: DownloadTokenStore = field(default_factory=DownloadTokenStore)
+    legacy_uploads: LegacyBrowserUploadStore = field(default_factory=LegacyBrowserUploadStore)
 
     def storage(self) -> YandexStorageClient:
         return YandexStorageClient(self.config_provider())
@@ -42,6 +43,20 @@ def create_local_app(state: LocalServerState) -> FastAPI:
         if record is None:
             raise HTTPException(status_code=404, detail="Ссылка недействительна или истекла")
         return HTMLResponse(render_local_upload_page(token, record.expires_at.strftime("%Y-%m-%d %H:%M:%S UTC")))
+
+    @app.get("/legacy-upload/{token}", response_class=HTMLResponse)
+    async def legacy_upload_page(token: str) -> HTMLResponse:
+        record = state.legacy_uploads.get(token)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Legacy upload token недействителен или истёк")
+        return HTMLResponse(
+            render_presigned_upload_page(
+                record.upload_url,
+                content_type=record.content_type,
+                expected_file_type=record.expected_file_type,
+                expires_at=record.expires_at.strftime("%Y-%m-%d %H:%M:%S UTC"),
+            )
+        )
 
     @app.post("/upload/{token}")
     async def upload_submit(token: str, file: UploadFile = File(...)):

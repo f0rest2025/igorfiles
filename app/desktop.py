@@ -9,7 +9,6 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
-from app.client_page import build_data_upload_url
 from app.config import AppConfig, AuthMode, ConfigError, DEFAULT_ENDPOINT, DEFAULT_REGION, REGION_ENDPOINTS, auth_mode_label, endpoint_for_region
 from app.diagnostics import get_logger, log_path, setup_logging
 from app.local_server import LocalServerRunner, LocalServerState
@@ -528,14 +527,12 @@ class MainFrame(ttk.Frame):
 
         def work():
             legacy_url = ""
-            legacy_html = ""
             if self.app.config.uses_legacy_static_keys:
                 legacy_url = self.app.storage().presign_upload(object_key, expires, content_type=content_type)
-                legacy_html = build_data_upload_url(legacy_url, content_type=content_type, expected_file_type=expected_type)
-            return legacy_url, legacy_html
+            return legacy_url
 
         def done(result) -> None:
-            raw_url, html_url = result
+            raw_url = result
             token = self.app.local_state.uploads.create(
                 object_key,
                 expires,
@@ -548,8 +545,15 @@ class MainFrame(ttk.Frame):
             self.upload_object_key.set(object_key)
             _set_text(self.upload_client_url, client_url)
             legacy_text = raw_url or "Недоступно в IAM mode. Основной сценарий: backend-mediated upload link выше."
-            if html_url:
-                legacy_text += "\n\nLegacy HTML data URL:\n" + html_url
+            if raw_url:
+                legacy_record = self.app.local_state.legacy_uploads.create(
+                    raw_url,
+                    expires,
+                    content_type=content_type,
+                    expected_file_type=expected_type,
+                )
+                legacy_page = f"{self.app.config.public_base_url.rstrip('/')}/legacy-upload/{legacy_record.token}"
+                legacy_text += "\n\nLegacy browser upload page:\n" + legacy_page
             _set_text(self.upload_url, legacy_text)
             expires_at = datetime.now(UTC) + timedelta(seconds=expires)
             self.status_upload.set(f"Ссылка действует до {expires_at:%Y-%m-%d %H:%M:%S UTC}")

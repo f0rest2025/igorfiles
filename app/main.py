@@ -8,7 +8,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from app.client_page import build_data_upload_url, render_local_upload_page
+from app.client_page import render_local_upload_page, render_presigned_upload_page
 from app.config import AppConfig, ConfigError, default_config_path, delete_config, load_config, save_config
 from app.models import (
     ConfigPayload,
@@ -24,7 +24,7 @@ from app.models import (
 from app.object_key import build_object_key, normalize_prefix
 from app.storage import StorageError, YandexStorageClient
 from app.upload_temp import EmptyUploadError, UploadTooLargeError, save_upload_to_temp
-from app.upload_tokens import DownloadTokenStore, UploadTokenStore
+from app.upload_tokens import DownloadTokenStore, LegacyBrowserUploadStore, UploadTokenStore
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -41,6 +41,7 @@ class AppState:
             self.config_error = str(exc)
         self.tokens = UploadTokenStore()
         self.downloads = DownloadTokenStore()
+        self.legacy_uploads = LegacyBrowserUploadStore()
 
     def update_config(self, payload: ConfigPayload) -> AppConfig:
         incoming = AppConfig.from_mapping(model_to_dict(payload))
@@ -141,7 +142,8 @@ async def presign_upload(payload: PresignUploadRequest, request: Request) -> Pre
     client_data_url = ""
     if state.config.uses_legacy_static_keys:
         upload_url = state.storage().presign_upload(object_key, payload.expires_in, content_type=content_type)
-        client_data_url = build_data_upload_url(upload_url, content_type=content_type, expected_file_type=expected_file_type)
+        legacy_record = state.legacy_uploads.create(upload_url, payload.expires_in, content_type=content_type, expected_file_type=expected_file_type)
+        client_data_url = str(request.url_for("legacy_upload_page", token=legacy_record.token))
     token = state.tokens.create(
         object_key,
         payload.expires_in,
@@ -197,6 +199,21 @@ async def local_upload_page(token: str) -> HTMLResponse:
     if record is None:
         raise HTTPException(status_code=404, detail="Ссылка недействительна или истекла")
     return HTMLResponse(render_local_upload_page(token, record.expires_at.strftime("%Y-%m-%d %H:%M:%S UTC")))
+
+
+@app.get("/legacy-upload/{token}", response_class=HTMLResponse, name="legacy_upload_page", include_in_schema=False)
+async def legacy_upload_page(token: str) -> HTMLResponse:
+    record = state.legacy_uploads.get(token)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Legacy upload token недействителен или истёк")
+    return HTMLResponse(
+        render_presigned_upload_page(
+            record.upload_url,
+            content_type=record.content_type,
+            expected_file_type=record.expected_file_type,
+            expires_at=record.expires_at.strftime("%Y-%m-%d %H:%M:%S UTC"),
+        )
+    )
 
 
 @app.post("/upload/{token}", response_model=StatusResponse, include_in_schema=False)
