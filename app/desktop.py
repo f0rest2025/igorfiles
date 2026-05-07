@@ -6,16 +6,15 @@ import webbrowser
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 import tkinter as tk
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
-from app.auth import AuthManager, AuthSession
 from app.client_page import build_data_upload_url
 from app.config import AppConfig, AuthMode, ConfigError, DEFAULT_ENDPOINT, DEFAULT_REGION, REGION_ENDPOINTS, auth_mode_label, endpoint_for_region
 from app.diagnostics import get_logger, log_path, setup_logging
 from app.local_server import LocalServerRunner, LocalServerState
 from app.object_key import build_object_key, normalize_prefix
-from app.secure_config import delete_secure_config, load_secure_config, save_secure_config, secure_config_path
+from app.operator_config import delete_operator_config, load_operator_config, operator_config_path, save_operator_config
 from app.storage import StorageError, YandexStorageClient
 
 
@@ -28,8 +27,6 @@ class DesktopApp(tk.Tk):
         self.title("Yandex Object Storage Manager")
         self.geometry("1220x780")
         self.minsize(980, 640)
-        self.auth = AuthManager()
-        self.session: AuthSession | None = None
         self.config = AppConfig()
         self.objects = []
         self.last_download_url = ""
@@ -37,7 +34,9 @@ class DesktopApp(tk.Tk):
         self.local_state = LocalServerState(lambda: self.config)
         self.local_server: LocalServerRunner | None = None
         self._configure_style()
-        self.show_auth()
+        self.load_initial_config()
+        self.restart_local_server()
+        self.show_main()
 
     def _configure_style(self) -> None:
         style = ttk.Style(self)
@@ -45,39 +44,37 @@ class DesktopApp(tk.Tk):
             style.theme_use("clam")
         except tk.TclError:
             pass
-        style.configure("TFrame", background="#f4f6f8")
+        self.configure(background="#ffffff")
+        style.configure("TFrame", background="#ffffff")
         style.configure("Panel.TFrame", background="#ffffff")
-        style.configure("TLabel", background="#f4f6f8", foreground="#172033")
-        style.configure("Panel.TLabel", background="#ffffff", foreground="#172033")
-        style.configure("TButton", padding=(10, 6))
-        style.configure("Primary.TButton", padding=(12, 7))
-        style.configure("Danger.TButton", foreground="#b42318")
-        style.configure("Treeview", rowheight=28)
-        style.configure("Treeview.Heading", font=("TkDefaultFont", 9, "bold"))
+        style.configure("Toolbar.TFrame", background="#ffffff")
+        style.configure("TLabel", background="#ffffff", foreground="#1f2937")
+        style.configure("Panel.TLabel", background="#ffffff", foreground="#1f2937")
+        style.configure("Muted.TLabel", background="#ffffff", foreground="#667085")
+        style.configure("TButton", padding=(12, 7), borderwidth=0)
+        style.map("TButton", background=[("active", "#e8eef8")])
+        style.configure("Primary.TButton", padding=(14, 8), foreground="#ffffff", background="#2563eb")
+        style.map("Primary.TButton", background=[("active", "#1d4ed8"), ("disabled", "#93a4c7")])
+        style.configure("Ghost.TButton", padding=(12, 7), foreground="#344054", background="#ffffff")
+        style.configure("Danger.TButton", foreground="#b42318", background="#ffffff")
+        style.configure("TNotebook", background="#ffffff", borderwidth=0)
+        style.configure("TNotebook.Tab", padding=(16, 9), background="#edf1f7", foreground="#475467")
+        style.map("TNotebook.Tab", background=[("selected", "#ffffff")], foreground=[("selected", "#111827")])
+        style.configure("Treeview", rowheight=30, background="#ffffff", fieldbackground="#ffffff", borderwidth=0)
+        style.configure("Treeview.Heading", font=("TkDefaultFont", 9, "bold"), background="#f2f4f7", foreground="#344054")
 
     def clear_root(self) -> None:
         for child in self.winfo_children():
             child.destroy()
 
-    def show_auth(self) -> None:
-        self.session = None
-        self.clear_root()
-        if self.auth.has_user():
-            LoginFrame(self, self.auth, self.on_authenticated).pack(fill="both", expand=True)
-        else:
-            SetupFrame(self, self.auth, self.on_authenticated).pack(fill="both", expand=True)
-
-    def on_authenticated(self, session: AuthSession) -> None:
-        self.session = session
+    def load_initial_config(self) -> None:
         try:
-            self.config = load_secure_config(session)
+            self.config = load_operator_config()
         except ConfigError as exc:
             messagebox.showerror("Конфиг", str(exc))
             self.config = AppConfig()
         setup_logging(self.config.debug)
-        logger.info("auth init ok user=%s mode=%s", session.username, self.config.auth_mode)
-        self.restart_local_server()
-        self.show_main()
+        logger.info("operator config loaded mode=%s", self.config.auth_mode)
 
     def restart_local_server(self) -> None:
         if self.local_server:
@@ -116,84 +113,6 @@ class DesktopApp(tk.Tk):
         messagebox.showerror("Ошибка", str(exc))
 
 
-class SetupFrame(ttk.Frame):
-    def __init__(self, app: DesktopApp, auth: AuthManager, on_done) -> None:
-        super().__init__(app, padding=28)
-        self.auth = auth
-        self.on_done = on_done
-        self.username = tk.StringVar(value="operator")
-        self.password = tk.StringVar()
-        self.password_repeat = tk.StringVar()
-        self.status = tk.StringVar(value="Первый запуск: создайте локального администратора.")
-        self._build()
-
-    def _build(self) -> None:
-        card = ttk.Frame(self, padding=28, style="Panel.TFrame")
-        card.place(relx=0.5, rely=0.5, anchor="center", width=440)
-        ttk.Label(card, text="Создание администратора", style="Panel.TLabel", font=("TkDefaultFont", 16, "bold")).pack(anchor="w")
-        ttk.Label(card, text="Пароль хранится как PBKDF2-хеш и используется для шифрования Secret Key.", style="Panel.TLabel", wraplength=380).pack(anchor="w", pady=(6, 18))
-        _entry(card, "Логин", self.username).pack(fill="x", pady=6)
-        _entry(card, "Пароль", self.password, show="*").pack(fill="x", pady=6)
-        _entry(card, "Повтор пароля", self.password_repeat, show="*").pack(fill="x", pady=6)
-        ttk.Button(card, text="Создать и войти", command=self.create_user, style="Primary.TButton").pack(fill="x", pady=(16, 8))
-        ttk.Label(card, textvariable=self.status, style="Panel.TLabel", foreground="#5f6b7a", wraplength=380).pack(anchor="w")
-
-    def create_user(self) -> None:
-        if self.password.get() != self.password_repeat.get():
-            self.status.set("Пароли не совпадают")
-            return
-        try:
-            session = self.auth.create_user(self.username.get(), self.password.get())
-        except ConfigError as exc:
-            self.status.set(str(exc))
-            return
-        self.on_done(session)
-
-
-class LoginFrame(ttk.Frame):
-    def __init__(self, app: DesktopApp, auth: AuthManager, on_done) -> None:
-        super().__init__(app, padding=28)
-        self.auth = auth
-        self.on_done = on_done
-        self.username = tk.StringVar(value="operator")
-        self.password = tk.StringVar()
-        self.status = tk.StringVar(value="Введите пароль оператора.")
-        self.failed_attempts = 0
-        self._build()
-
-    def _build(self) -> None:
-        card = ttk.Frame(self, padding=28, style="Panel.TFrame")
-        card.place(relx=0.5, rely=0.5, anchor="center", width=400)
-        ttk.Label(card, text="Вход", style="Panel.TLabel", font=("TkDefaultFont", 17, "bold")).pack(anchor="w")
-        ttk.Label(card, text="Доступ к настройкам и ключам открыт только после входа.", style="Panel.TLabel", wraplength=340).pack(anchor="w", pady=(6, 18))
-        _entry(card, "Логин", self.username).pack(fill="x", pady=6)
-        password_box = _entry(card, "Пароль", self.password, show="*")
-        password_box.pack(fill="x", pady=6)
-        password_box.entry.bind("<Return>", lambda _: self.login())
-        self.login_button = ttk.Button(card, text="Войти", command=self.login, style="Primary.TButton")
-        self.login_button.pack(fill="x", pady=(16, 8))
-        ttk.Label(card, textvariable=self.status, style="Panel.TLabel", foreground="#5f6b7a", wraplength=340).pack(anchor="w")
-
-    def login(self) -> None:
-        try:
-            session = self.auth.verify(self.username.get(), self.password.get())
-        except ConfigError as exc:
-            self.failed_attempts += 1
-            self.status.set(str(exc))
-            if self.failed_attempts >= 5:
-                self.login_button.state(["disabled"])
-                self.status.set("Слишком много попыток. Повторите через 10 секунд.")
-                self.after(10_000, self._unlock)
-            return
-        self.failed_attempts = 0
-        self.on_done(session)
-
-    def _unlock(self) -> None:
-        self.failed_attempts = 0
-        self.login_button.state(["!disabled"])
-        self.status.set("Введите пароль оператора.")
-
-
 class MainFrame(ttk.Frame):
     def __init__(self, app: DesktopApp) -> None:
         super().__init__(app, padding=14)
@@ -209,11 +128,16 @@ class MainFrame(ttk.Frame):
 
     def _build(self) -> None:
         header = ttk.Frame(self)
-        header.pack(fill="x", pady=(0, 10))
-        ttk.Label(header, text="Yandex Object Storage Manager", font=("TkDefaultFont", 17, "bold")).pack(side="left")
-        ttk.Label(header, text=f"Конфиг: {secure_config_path()}", foreground="#657286").pack(side="left", padx=18)
-        ttk.Button(header, text="Сменить пароль", command=self.change_password).pack(side="right", padx=(8, 0))
-        ttk.Button(header, text="Заблокировать", command=self.app.show_auth).pack(side="right")
+        header.pack(fill="x", pady=(0, 14))
+        title_block = ttk.Frame(header)
+        title_block.pack(side="left", fill="x", expand=True)
+        ttk.Label(title_block, text="Yandex Object Storage Manager", font=("TkDefaultFont", 18, "bold")).pack(anchor="w")
+        ttk.Label(
+            title_block,
+            text=f"Локальное desktop-приложение без входа. Конфиг: {operator_config_path()}",
+            style="Muted.TLabel",
+        ).pack(anchor="w", pady=(3, 0))
+        ttk.Button(header, text="Открыть логи", command=self.open_logs, style="Ghost.TButton").pack(side="right")
 
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill="both", expand=True)
@@ -224,9 +148,9 @@ class MainFrame(ttk.Frame):
         self._direct_tab()
 
     def _connection_tab(self) -> None:
-        tab = ttk.Frame(self.notebook, padding=16)
+        tab = ttk.Frame(self.notebook, padding=20, style="Panel.TFrame")
         self.notebook.add(tab, text="Подключение")
-        form = ttk.Frame(tab)
+        form = ttk.Frame(tab, style="Panel.TFrame")
         form.pack(fill="x")
         self.auth_mode = tk.StringVar(value=AuthMode.YC_CLI.value)
         self.access_key_id = tk.StringVar()
@@ -242,7 +166,7 @@ class MainFrame(ttk.Frame):
         self.public_base_url = tk.StringVar(value="http://127.0.0.1:8765")
         self.debug = tk.BooleanVar(value=False)
 
-        auth_group = ttk.Frame(form)
+        auth_group = ttk.Frame(form, style="Panel.TFrame")
         auth_group.grid(row=0, column=0, sticky="ew", padx=8, pady=7)
         ttk.Label(auth_group, text="Способ аутентификации").pack(anchor="w")
         ttk.Combobox(
@@ -253,7 +177,7 @@ class MainFrame(ttk.Frame):
         ).pack(fill="x")
         self.auth_mode.trace_add("write", lambda *_: self.update_auth_hint())
 
-        region_group = ttk.Frame(form)
+        region_group = ttk.Frame(form, style="Panel.TFrame")
         region_group.grid(row=0, column=1, sticky="ew", padx=8, pady=7)
         ttk.Label(region_group, text="Region").pack(anchor="w")
         ttk.Combobox(region_group, textvariable=self.region, values=list(REGION_ENDPOINTS), state="readonly").pack(fill="x")
@@ -272,7 +196,7 @@ class MainFrame(ttk.Frame):
         _grid_entry(form, "Public base URL для client links", self.public_base_url, 6, 0)
         ttk.Checkbutton(form, text="Debug logs", variable=self.debug).grid(row=6, column=1, sticky="w", padx=8, pady=(25, 7))
 
-        actions = ttk.Frame(tab)
+        actions = ttk.Frame(tab, style="Panel.TFrame")
         actions.pack(fill="x", pady=14)
         ttk.Button(actions, text="Проверить подключение", command=self.test_connection).pack(side="left", padx=(0, 8))
         ttk.Button(actions, text="Применить", command=self.apply_config).pack(side="left", padx=8)
@@ -284,9 +208,9 @@ class MainFrame(ttk.Frame):
         ttk.Label(tab, textvariable=self.status_connection, foreground="#5f6b7a").pack(anchor="w")
 
     def _files_tab(self) -> None:
-        tab = ttk.Frame(self.notebook, padding=16)
+        tab = ttk.Frame(self.notebook, padding=20, style="Panel.TFrame")
         self.notebook.add(tab, text="Файлы")
-        toolbar = ttk.Frame(tab)
+        toolbar = ttk.Frame(tab, style="Panel.TFrame")
         toolbar.pack(fill="x", pady=(0, 10))
         self.files_prefix = tk.StringVar()
         self.files_search = tk.StringVar()
@@ -295,7 +219,7 @@ class MainFrame(ttk.Frame):
         search_box = _inline_entry(toolbar, "Поиск", self.files_search, width=28)
         search_box.pack(side="left", padx=10)
         search_box.entry.bind("<KeyRelease>", lambda _: self.render_objects())
-        sort_box = ttk.Frame(toolbar)
+        sort_box = ttk.Frame(toolbar, style="Panel.TFrame")
         sort_box.pack(side="left", padx=10)
         ttk.Label(sort_box, text="Сортировка").pack(anchor="w")
         ttk.Combobox(
@@ -325,9 +249,9 @@ class MainFrame(ttk.Frame):
         ttk.Label(tab, textvariable=self.status_files, foreground="#5f6b7a").pack(anchor="w", pady=(8, 0))
 
     def _upload_tab(self) -> None:
-        tab = ttk.Frame(self.notebook, padding=16)
+        tab = ttk.Frame(self.notebook, padding=20, style="Panel.TFrame")
         self.notebook.add(tab, text="Ссылка на загрузку")
-        form = ttk.Frame(tab)
+        form = ttk.Frame(tab, style="Panel.TFrame")
         form.pack(fill="x")
         self.upload_name = tk.StringVar()
         self.upload_prefix = tk.StringVar()
@@ -343,7 +267,7 @@ class MainFrame(ttk.Frame):
         _grid_entry(form, "Content-Type", self.upload_content_type, 1, 1)
         _grid_entry(form, "Ожидаемый тип файла", self.upload_expected_type, 2, 0)
         _grid_entry(form, "Максимальный размер, МБ", self.upload_max_size_mb, 2, 1)
-        checks = ttk.Frame(tab)
+        checks = ttk.Frame(tab, style="Panel.TFrame")
         checks.pack(fill="x", pady=(10, 0))
         ttk.Checkbutton(checks, text="Добавить GUID к имени", variable=self.upload_guid).pack(side="left", padx=(0, 20))
         ttk.Checkbutton(checks, text="Санитизировать имя", variable=self.upload_sanitize).pack(side="left")
@@ -363,15 +287,15 @@ class MainFrame(ttk.Frame):
         ttk.Button(tab, text="Копировать legacy raw URL", command=lambda: self.copy_text_widget(self.upload_url)).pack(anchor="w", pady=5)
 
     def _download_tab(self) -> None:
-        tab = ttk.Frame(self.notebook, padding=16)
+        tab = ttk.Frame(self.notebook, padding=20, style="Panel.TFrame")
         self.notebook.add(tab, text="Ссылка на скачивание")
-        form = ttk.Frame(tab)
+        form = ttk.Frame(tab, style="Panel.TFrame")
         form.pack(fill="x")
         self.download_key = tk.StringVar()
         self.download_expires = tk.StringVar(value="3600")
         _grid_entry(form, "Object key", self.download_key, 0, 0)
         _grid_entry(form, "Срок жизни, секунд", self.download_expires, 0, 1)
-        actions = ttk.Frame(tab)
+        actions = ttk.Frame(tab, style="Panel.TFrame")
         actions.pack(fill="x", pady=12)
         ttk.Button(actions, text="Сгенерировать download-ссылку", command=self.generate_download_link).pack(side="left")
         ttk.Button(actions, text="Открыть", command=self.open_download_url).pack(side="left", padx=10)
@@ -381,13 +305,13 @@ class MainFrame(ttk.Frame):
         ttk.Button(tab, text="Копировать ссылку", command=lambda: self.copy_text_widget(self.download_url)).pack(anchor="w")
 
     def _direct_tab(self) -> None:
-        tab = ttk.Frame(self.notebook, padding=16)
+        tab = ttk.Frame(self.notebook, padding=20, style="Panel.TFrame")
         self.notebook.add(tab, text="Прямая загрузка")
-        file_row = ttk.Frame(tab)
+        file_row = ttk.Frame(tab, style="Panel.TFrame")
         file_row.pack(fill="x")
         _inline_entry(file_row, "Файл", self.file_path, width=70).pack(side="left", fill="x", expand=True)
         ttk.Button(file_row, text="Выбрать файл", command=self.choose_file).pack(side="left", padx=10, pady=(17, 0))
-        form = ttk.Frame(tab)
+        form = ttk.Frame(tab, style="Panel.TFrame")
         form.pack(fill="x", pady=10)
         self.direct_prefix = tk.StringVar()
         self.direct_name = tk.StringVar()
@@ -395,11 +319,11 @@ class MainFrame(ttk.Frame):
         self.direct_sanitize = tk.BooleanVar(value=True)
         _grid_entry(form, "Prefix", self.direct_prefix, 0, 0)
         _grid_entry(form, "Итоговое имя объекта", self.direct_name, 0, 1)
-        checks = ttk.Frame(tab)
+        checks = ttk.Frame(tab, style="Panel.TFrame")
         checks.pack(fill="x")
         ttk.Checkbutton(checks, text="Добавить GUID к имени", variable=self.direct_guid).pack(side="left", padx=(0, 20))
         ttk.Checkbutton(checks, text="Санитизировать имя", variable=self.direct_sanitize).pack(side="left")
-        actions = ttk.Frame(tab)
+        actions = ttk.Frame(tab, style="Panel.TFrame")
         actions.pack(fill="x", pady=12)
         ttk.Button(actions, text="Загрузить", command=self.direct_upload).pack(side="left")
         ttk.Button(actions, text="Показать в списке файлов", command=self.show_direct_in_files).pack(side="left", padx=10)
@@ -477,24 +401,22 @@ class MainFrame(ttk.Frame):
         self.status_connection.set("Настройки применены")
 
     def save_config(self) -> None:
-        if self.app.session is None:
-            self.status_connection.set("Сессия заблокирована")
-            return
         try:
             config = self.app.update_config(self.read_config_form(), preserve_blank_secret=True)
         except ValueError as exc:
             self.status_connection.set(str(exc))
             return
-        path = save_secure_config(config, self.app.session)
+        path = save_operator_config(config)
         setup_logging(self.app.config.debug)
         self.app.restart_local_server()
-        self.status_connection.set(f"Настройки сохранены: {path}")
+        note = " Legacy Secret Key не сохраняется." if config.auth_mode == AuthMode.LEGACY_STATIC.value else ""
+        self.status_connection.set(f"Настройки сохранены: {path}.{note}")
 
     def clear_config(self) -> None:
-        if not messagebox.askyesno("Очистить", "Очистить настройки подключения и удалить защищённый desktop-конфиг?"):
+        if not messagebox.askyesno("Очистить", "Очистить настройки подключения и удалить desktop-конфиг?"):
             return
         self.app.config = AppConfig()
-        delete_secure_config()
+        delete_operator_config()
         setup_logging(self.app.config.debug)
         self.app.restart_local_server()
         self.fill_config()
@@ -702,24 +624,8 @@ class MainFrame(ttk.Frame):
         self.notebook.select(1)
         self.refresh_files()
 
-    def change_password(self) -> None:
-        if self.app.session is None:
-            return
-        password = simpledialog.askstring("Смена пароля", "Новый пароль", show="*", parent=self)
-        if not password:
-            return
-        repeat = simpledialog.askstring("Смена пароля", "Повторите новый пароль", show="*", parent=self)
-        if password != repeat:
-            messagebox.showerror("Смена пароля", "Пароли не совпадают")
-            return
-        try:
-            new_session = self.app.auth.change_password(self.app.session, password)
-            save_secure_config(self.app.config, new_session)
-        except ConfigError as exc:
-            messagebox.showerror("Смена пароля", str(exc))
-            return
-        self.app.session = new_session
-        messagebox.showinfo("Смена пароля", "Пароль изменён, Secret Key пере-зашифрован.")
+    def open_logs(self) -> None:
+        webbrowser.open(str(log_path()))
 
     def copy_value(self, value: str) -> None:
         if not value:
@@ -733,8 +639,8 @@ class MainFrame(ttk.Frame):
 
 class _EntryGroup(ttk.Frame):
     def __init__(self, parent, label: str, variable: tk.StringVar, show: str | None = None, width: int | None = None) -> None:
-        super().__init__(parent)
-        ttk.Label(self, text=label).pack(anchor="w")
+        super().__init__(parent, style="Panel.TFrame")
+        ttk.Label(self, text=label, style="Panel.TLabel").pack(anchor="w")
         self.entry = ttk.Entry(self, textvariable=variable, show=show or "", width=width)
         self.entry.pack(fill="x")
 

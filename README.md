@@ -1,8 +1,8 @@
 # Yandex Object Storage Manager
 
-Desktop-приложение для оператора под Windows/Linux, которое работает с Yandex Object Storage без обязательного ввода static access key / secret key. Основной сценарий использует IAM token и локальный backend-mediated upload flow: клиент загружает файл только в `/upload/<token>`, а приложение само отправляет объект в bucket от имени оператора.
+Desktop-приложение для оператора под Windows/Linux, которое работает с Yandex Object Storage без обязательного ввода static access key / secret key. Встроенной авторизации пользователей приложения нет: окно оператора открывается сразу. Основной сценарий использует IAM token и локальный backend-mediated upload flow: клиент загружает файл только в `/upload/<token>`, а приложение само отправляет объект в bucket от имени оператора.
 
-## Новая архитектура auth
+## Новая архитектура доступа к Yandex Cloud
 
 Основной режим:
 
@@ -86,14 +86,14 @@ Endpoint можно переопределить вручную.
 
 ```bash
 git push origin main
-git tag v0.3.0
-git push origin v0.3.0
+git tag v0.4.0
+git push origin v0.4.0
 ```
 
 После сборки в GitHub Releases появится:
 
 ```text
-YandexStorageManagerSetup-0.3.0.exe
+YandexStorageManagerSetup-0.4.0.exe
 ```
 
 ## Запуск из исходников
@@ -170,18 +170,19 @@ Linux:
 
 Файлы:
 
-- `auth.json` - локальный пользователь, salt, PBKDF2 hash;
-- `desktop_config.secure.json` - operator config;
+- `desktop_config.json` - operator config без пароля приложения;
 - `app.log` - безопасные логи;
-- `config.json` - legacy web config, если старый web-режим использовался.
+- `config.json` - legacy web config, если старый web-режим использовался;
+- `desktop_config.secure.json` / `auth.json` - старые файлы прошлой версии с локальным входом, новой версией не используются.
 
-В `yc_cli` режиме static secrets не сохраняются. В `service_account_json` режиме сохраняется путь к JSON, сам JSON остаётся в выбранном месте. В `legacy_static` режиме secret key шифруется локальным паролем оператора.
+В `yc_cli` режиме static secrets не сохраняются. В `service_account_json` режиме сохраняется путь к JSON, сам JSON остаётся в выбранном месте. В `legacy_static` режиме `Secret Key` не сохраняется на диск вообще: его нужно вводить заново после перезапуска приложения.
 
 ## Диагностика
 
 Логируются этапы:
 
-- auth init;
+- operator config load;
+- IAM auth init;
 - token acquire;
 - bucket check;
 - object list;
@@ -209,8 +210,7 @@ pytest
 
 Покрыто:
 
-- local auth;
-- secure config;
+- operator config без сохранения legacy secret key;
 - RU/KZ endpoint config;
 - migration старого static config в legacy mode;
 - upload token одноразовость;
@@ -230,6 +230,7 @@ pytest
 - legacy `data:` HTML upload page.
 
 Новый основной сценарий desktop GUI не отдаёт клиенту presigned PUT URL и не требует static access key.
+Встроенная авторизация пользователей приложения удалена: приложение открывается сразу, без логина и пароля.
 
 ## Известные ограничения
 
@@ -237,4 +238,3 @@ pytest
 - Local upload/download tokens хранятся в памяти и сбрасываются при перезапуске приложения.
 - Service account JSON является чувствительным файлом; приложение хранит путь, но сам файл нужно защищать на диске.
 - Windows installer собирается в GitHub Actions на Windows runner, локально на Linux он не собирается.
-
