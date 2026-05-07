@@ -7,15 +7,16 @@ from dataclasses import asdict, dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 
 APP_DIR_NAME = "YandexStorageFileManager"
 REGION_ENDPOINTS = {
-    "ru-central1": "https://storage.yandexcloud.net",
     "kz1": "https://storage.yandexcloud.kz",
 }
-DEFAULT_REGION = "ru-central1"
+DEFAULT_REGION = "kz1"
 DEFAULT_ENDPOINT = REGION_ENDPOINTS[DEFAULT_REGION]
+DISABLED_STORAGE_HOSTS = {"storage.yandexcloud.net"}
 
 
 class AuthMode(StrEnum):
@@ -41,11 +42,15 @@ class AppConfig:
     public_base_url: str = "http://127.0.0.1:8765"
     debug: bool = False
 
+    def __post_init__(self) -> None:
+        self.region = normalize_region(self.region)
+        self.endpoint = normalize_endpoint(self.endpoint, self.region)
+
     @classmethod
     def from_mapping(cls, raw: dict[str, Any] | None) -> "AppConfig":
         raw = raw or {}
-        region = str(raw.get("region") or DEFAULT_REGION).strip() or DEFAULT_REGION
-        endpoint = str(raw.get("endpoint") or endpoint_for_region(region)).strip() or endpoint_for_region(region)
+        region = normalize_region(str(raw.get("region") or DEFAULT_REGION).strip())
+        endpoint = normalize_endpoint(str(raw.get("endpoint") or endpoint_for_region(region)).strip(), region)
         auth_mode_raw = raw.get("auth_mode")
         if auth_mode_raw:
             auth_mode = str(auth_mode_raw).strip()
@@ -84,8 +89,8 @@ class AppConfig:
             secret_key=secret_key,
             bucket=update.bucket,
             prefix=update.prefix,
-            endpoint=update.endpoint or endpoint_for_region(update.region),
-            region=update.region or DEFAULT_REGION,
+            endpoint=normalize_endpoint(update.endpoint, update.region),
+            region=normalize_region(update.region),
             auth_mode=update.auth_mode or AuthMode.YC_CLI.value,
             yc_profile=update.yc_profile,
             service_account_key_path=update.service_account_key_path,
@@ -117,14 +122,19 @@ class AppConfig:
                 missing.append("Access Key ID")
             if not self.secret_key:
                 missing.append("Secret Key")
-        elif self.auth_mode == AuthMode.SERVICE_ACCOUNT_JSON.value and not self.service_account_key_path:
-            missing.append("Service account JSON")
+        elif self.auth_mode == AuthMode.SERVICE_ACCOUNT_JSON.value:
+            if not self.service_account_key_path:
+                missing.append("Service account JSON")
         elif self.auth_mode == AuthMode.YC_CLI.value:
             pass
         else:
             missing.append("Способ аутентификации")
         if missing:
             raise ConfigError("Не заполнены поля подключения: " + ", ".join(missing))
+        if self.region != DEFAULT_REGION:
+            raise ConfigError("Поддерживается только KZ region kz1")
+        if is_disabled_storage_endpoint(self.endpoint):
+            raise ConfigError("Российский endpoint storage.yandexcloud.net отключён. Используйте https://storage.yandexcloud.kz")
 
     @property
     def uses_legacy_static_keys(self) -> bool:
@@ -188,7 +198,27 @@ def mask_secret(value: str) -> str:
 
 
 def endpoint_for_region(region: str) -> str:
-    return REGION_ENDPOINTS.get((region or "").strip(), DEFAULT_ENDPOINT)
+    return REGION_ENDPOINTS.get(normalize_region(region), DEFAULT_ENDPOINT)
+
+
+def normalize_region(region: str) -> str:
+    region = (region or "").strip()
+    if region in REGION_ENDPOINTS:
+        return region
+    return DEFAULT_REGION
+
+
+def normalize_endpoint(endpoint: str, region: str = DEFAULT_REGION) -> str:
+    endpoint = (endpoint or "").strip()
+    if not endpoint or is_disabled_storage_endpoint(endpoint):
+        return endpoint_for_region(region)
+    return endpoint
+
+
+def is_disabled_storage_endpoint(endpoint: str) -> bool:
+    parsed = urlparse((endpoint or "").strip())
+    host = parsed.hostname or (endpoint or "").strip().split("/", 1)[0]
+    return host.lower() in DISABLED_STORAGE_HOSTS
 
 
 def auth_mode_label(auth_mode: str) -> str:

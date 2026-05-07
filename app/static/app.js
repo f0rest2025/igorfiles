@@ -43,8 +43,8 @@ function fillConfig(config) {
     : "Secret Key";
   $("bucket").value = config.bucket || "";
   $("prefix").value = config.prefix || "";
-  $("endpoint").value = config.endpoint || "https://storage.yandexcloud.net";
-  $("region").value = config.region || "ru-central1";
+  $("endpoint").value = config.endpoint || "https://storage.yandexcloud.kz";
+  $("region").value = config.region || "kz1";
   $("files-prefix").value = config.prefix || "";
   $("upload-prefix").value = config.prefix || "";
   $("direct-prefix").value = config.prefix || "";
@@ -313,4 +313,3 @@ $("direct-show-files").addEventListener("click", async () => {
 });
 
 loadInitial();
-

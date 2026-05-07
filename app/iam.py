@@ -13,11 +13,17 @@ from typing import Protocol
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
-from app.config import AppConfig, AuthMode, ConfigError
+from app.config import AppConfig, AuthMode, ConfigError, DEFAULT_REGION
 from app.diagnostics import get_logger, redact
 
 
-IAM_TOKEN_URL = "https://iam.api.cloud.yandex.net/iam/v1/tokens"
+KZ_IAM_TOKEN_URL = "https://iam.api.yandexcloud.kz/iam/v1/tokens"
+IAM_TOKEN_URL_BY_REGION = {
+    DEFAULT_REGION: KZ_IAM_TOKEN_URL,
+}
+YC_CLI_ENDPOINT_BY_REGION = {
+    DEFAULT_REGION: "api.yandexcloud.kz:443",
+}
 TOKEN_REFRESH_MARGIN_SECONDS = 300
 
 logger = get_logger(__name__)
@@ -35,8 +41,9 @@ class TokenProvider(Protocol):
 
 
 class YcCliTokenProvider:
-    def __init__(self, profile: str = "") -> None:
+    def __init__(self, profile: str = "", region: str = DEFAULT_REGION) -> None:
         self.profile = profile.strip()
+        self.region = region
         self._cached: IamToken | None = None
 
     def get_token(self) -> str:
@@ -46,7 +53,10 @@ class YcCliTokenProvider:
         cmd = ["yc", "iam", "create-token"]
         if self.profile:
             cmd.extend(["--profile", self.profile])
-        logger.info("auth token acquire via yc cli profile=%s", self.profile or "default")
+        yc_endpoint = YC_CLI_ENDPOINT_BY_REGION.get(self.region)
+        if yc_endpoint:
+            cmd.extend(["--endpoint", yc_endpoint])
+        logger.info("auth token acquire via yc cli profile=%s region=%s", self.profile or "default", self.region)
         try:
             result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=30)
         except FileNotFoundError as exc:
@@ -65,23 +75,24 @@ class YcCliTokenProvider:
         if not token:
             raise ConfigError("Yandex CLI вернул пустой IAM token")
         self._cached = IamToken(token, time.time() + 3600)
-        logger.info("auth token acquired via yc cli profile=%s", self.profile or "default")
+        logger.info("auth token acquired via yc cli profile=%s region=%s", self.profile or "default", self.region)
         return token
 
 
 class ServiceAccountJsonTokenProvider:
-    def __init__(self, key_path: str) -> None:
+    def __init__(self, key_path: str, iam_token_url: str = KZ_IAM_TOKEN_URL) -> None:
         self.key_path = Path(key_path).expanduser()
+        self.iam_token_url = iam_token_url
         self._cached: IamToken | None = None
 
     def get_token(self) -> str:
         if self._cached and self._cached.expires_at - TOKEN_REFRESH_MARGIN_SECONDS > time.time():
             return self._cached.value
-        logger.info("auth token acquire via service account json path=%s", self.key_path)
+        logger.info("auth token acquire via service account json path=%s iam_url=%s", self.key_path, self.iam_token_url)
         jwt = self._create_jwt()
         payload = json.dumps({"jwt": jwt}).encode("utf-8")
         request = urllib.request.Request(
-            IAM_TOKEN_URL,
+            self.iam_token_url,
             data=payload,
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -102,7 +113,7 @@ class ServiceAccountJsonTokenProvider:
             raise ConfigError("IAM API не вернул iamToken")
         expires_at = _parse_expiry(data.get("expiresAt")) or (time.time() + 3600)
         self._cached = IamToken(token, expires_at)
-        logger.info("auth token acquired via service account json path=%s", self.key_path)
+        logger.info("auth token acquired via service account json path=%s iam_url=%s", self.key_path, self.iam_token_url)
         return token
 
     def _create_jwt(self) -> str:
@@ -122,7 +133,7 @@ class ServiceAccountJsonTokenProvider:
         now = int(time.time())
         header = {"typ": "JWT", "alg": "PS256", "kid": key_id}
         claims = {
-            "aud": IAM_TOKEN_URL,
+            "aud": self.iam_token_url,
             "iss": service_account_id,
             "iat": now,
             "exp": now + 3600,
@@ -139,10 +150,14 @@ class ServiceAccountJsonTokenProvider:
 
 def create_token_provider(config: AppConfig) -> TokenProvider | None:
     if config.auth_mode == AuthMode.YC_CLI.value:
-        return YcCliTokenProvider(config.yc_profile)
+        return YcCliTokenProvider(config.yc_profile, config.region)
     if config.auth_mode == AuthMode.SERVICE_ACCOUNT_JSON.value:
-        return ServiceAccountJsonTokenProvider(config.service_account_key_path)
+        return ServiceAccountJsonTokenProvider(config.service_account_key_path, iam_token_url_for_region(config.region))
     return None
+
+
+def iam_token_url_for_region(region: str) -> str:
+    return IAM_TOKEN_URL_BY_REGION.get((region or "").strip(), KZ_IAM_TOKEN_URL)
 
 
 def _b64url_json(value: dict) -> str:
@@ -170,4 +185,3 @@ def _friendly_body(body: str) -> str:
     except json.JSONDecodeError:
         return body[:300]
     return str(data.get("message") or data.get("error") or data)[:300]
-

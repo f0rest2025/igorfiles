@@ -11,8 +11,8 @@ def test_operator_config_does_not_store_legacy_secret_key(tmp_path):
         secret_key="secret-value",
         bucket="bucket",
         prefix="incoming",
-        endpoint="https://storage.yandexcloud.net",
-        region="ru-central1",
+        endpoint="https://storage.yandexcloud.kz",
+        region="kz1",
         auth_mode=AuthMode.LEGACY_STATIC.value,
     )
 
@@ -41,4 +41,3 @@ def test_operator_config_clears_static_key_outside_legacy_mode(tmp_path):
     raw = json.loads(path.read_text(encoding="utf-8"))
 
     assert raw["access_key_id"] == ""
-

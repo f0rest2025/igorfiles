@@ -55,14 +55,14 @@ http://127.0.0.1:8765/upload/<token>
 
 Важно: если клиент находится не на компьютере оператора, `public_base_url` должен указывать на адрес, по которому клиент реально видит локальный backend: LAN IP, VPN/tunnel или reverse proxy. По умолчанию backend слушает `127.0.0.1:8765`.
 
-## Регионы
+## Регион
 
-Поддержаны пресеты:
+Приложение настроено как KZ-only, чтобы старый RU endpoint не ломал авторизацию и не уводил запросы не туда:
 
-- RU: `region = ru-central1`, `endpoint = https://storage.yandexcloud.net`
-- KZ: `region = kz1`, `endpoint = https://storage.yandexcloud.kz`
+- `region = kz1`
+- `endpoint = https://storage.yandexcloud.kz`
 
-Endpoint можно переопределить вручную.
+Старые сохранённые настройки с RU region/endpoint автоматически переводятся на KZ. Для `kz1` приложение использует KZ IAM API при обмене service account JSON на IAM token и добавляет KZ endpoint для `yc CLI`.
 
 ## Установщик Windows 11 с GitHub
 
@@ -86,14 +86,14 @@ Endpoint можно переопределить вручную.
 
 ```bash
 git push origin main
-git tag v0.4.0
-git push origin v0.4.0
+git tag v0.4.1
+git push origin v0.4.1
 ```
 
 После сборки в GitHub Releases появится:
 
 ```text
-YandexStorageManagerSetup-0.4.0.exe
+YandexStorageManagerSetup-0.4.1.exe
 ```
 
 ## Запуск из исходников
@@ -144,13 +144,14 @@ sudo apt install python3-tk
 - установить и инициализировать Yandex Cloud CLI;
 - выбрать `yc_cli`;
 - указать profile, если используется не default;
-- указать bucket/prefix/region/endpoint;
+- указать bucket/prefix;
 - нажать «Проверить подключение».
 
 Для service account JSON:
 
 - создайте service account authorized key JSON;
 - выдайте service account права на bucket, например `storage.viewer` для списка/скачивания и `storage.editor` для загрузки;
+- проверьте, что выбран `region = kz1` и `endpoint = https://storage.yandexcloud.kz`;
 - выберите файл JSON в GUI;
 - проверьте подключение.
 

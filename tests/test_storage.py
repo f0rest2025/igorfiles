@@ -40,8 +40,8 @@ def configured_client(monkeypatch):
             access_key_id="access",
             secret_key="secret",
             bucket="bucket",
-            endpoint="https://storage.yandexcloud.net",
-            region="ru-central1",
+            endpoint="https://storage.yandexcloud.kz",
+            region="kz1",
             auth_mode=AuthMode.LEGACY_STATIC.value,
         )
     )
