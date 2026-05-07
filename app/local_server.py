@@ -92,7 +92,14 @@ class LocalServerRunner:
         if self.thread and self.thread.is_alive():
             return
         app = create_local_app(self.state)
-        config = uvicorn.Config(app, host=self.host, port=self.port, log_level="warning", access_log=False)
+        config = uvicorn.Config(
+            app,
+            host=self.host,
+            port=self.port,
+            log_level="warning",
+            access_log=False,
+            log_config=None,
+        )
         self.server = uvicorn.Server(config)
         self.thread = threading.Thread(target=self.server.run, daemon=True)
         self.thread.start()
