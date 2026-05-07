@@ -55,6 +55,19 @@ http://127.0.0.1:8765/upload/<token>
 
 Важно: если клиент находится не на компьютере оператора, `public_base_url` должен указывать на адрес, по которому клиент реально видит локальный backend: LAN IP, VPN/tunnel или reverse proxy. По умолчанию backend слушает `127.0.0.1:8765`.
 
+## Большие файлы
+
+Загрузка в Object Storage идёт через `boto3` multipart transfer:
+
+- `multipart_threshold = 8 MB`;
+- `multipart_chunksize = 8 MB`;
+- `max_concurrency = 3`;
+- `connect_timeout = 30`;
+- `read_timeout = 1800`;
+- retries включены через botocore standard retry mode.
+
+Operator direct upload не читает весь файл в память. Client upload через локальный backend сначала сохраняет входящий файл во временный файл на диск, затем отправляет этот temp file в Object Storage через тот же multipart path. В desktop GUI для прямой загрузки есть progress bar; клиентская upload-страница показывает прогресс передачи файла в локальное приложение и отдельный статус загрузки в Object Storage.
+
 ## Регион
 
 Приложение настроено как KZ-only, чтобы старый RU endpoint не ломал авторизацию и не уводил запросы не туда:
@@ -86,14 +99,14 @@ http://127.0.0.1:8765/upload/<token>
 
 ```bash
 git push origin main
-git tag v0.4.1
-git push origin v0.4.1
+git tag v0.4.2
+git push origin v0.4.2
 ```
 
 После сборки в GitHub Releases появится:
 
 ```text
-YandexStorageManagerSetup-0.4.1.exe
+YandexStorageManagerSetup-0.4.2.exe
 ```
 
 ## Запуск из исходников
@@ -188,6 +201,12 @@ Linux:
 - bucket check;
 - object list;
 - direct upload;
+- temp file saved;
+- object storage upload started;
+- multipart upload started;
+- uploaded bytes / progress;
+- upload completed;
+- upload failed с exception class и traceback;
 - upload token generation;
 - client upload consume;
 - download link generation.
@@ -217,6 +236,9 @@ pytest
 - upload token одноразовость;
 - object key generation;
 - legacy presigned mock;
+- multipart transfer config и progress callback;
+- temp-file upload для client backend;
+- понятное сообщение для SSL write error;
 - XML parsing для IAM HTTP list objects;
 - FastAPI health handler.
 

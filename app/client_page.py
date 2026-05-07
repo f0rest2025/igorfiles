@@ -25,6 +25,7 @@ def render_local_upload_page(token: str, expires_at: str) -> str:
     input[type=file] {{ width: 100%; border: 1px solid var(--border); border-radius: 6px; padding: 12px; background: #fff; }}
     button {{ margin-top: 16px; width: 100%; min-height: 44px; border: 0; border-radius: 6px; background: var(--accent); color: #fff; font-weight: 650; cursor: pointer; }}
     button:disabled {{ opacity: .55; cursor: wait; }}
+    progress {{ width: 100%; height: 12px; margin-top: 14px; }}
     .status {{ min-height: 22px; margin-top: 14px; font-size: 14px; }}
     .ok {{ color: var(--ok); }}
     .err {{ color: var(--err); }}
@@ -39,6 +40,7 @@ def render_local_upload_page(token: str, expires_at: str) -> str:
       <label for="file">Файл</label>
       <input id="file" name="file" type="file" required>
       <button id="submit" type="submit">Загрузить</button>
+      <progress id="progress" value="0" max="100" hidden></progress>
       <div id="status" class="status"></div>
       <small>Ссылка действует до {escaped_expires_at}</small>
     </form>
@@ -48,26 +50,50 @@ def render_local_upload_page(token: str, expires_at: str) -> str:
     const fileInput = document.getElementById('file');
     const submit = document.getElementById('submit');
     const statusBox = document.getElementById('status');
+    const progress = document.getElementById('progress');
     form.addEventListener('submit', async (event) => {{
       event.preventDefault();
       const file = fileInput.files[0];
       if (!file) return;
       submit.disabled = true;
+      progress.hidden = false;
+      progress.value = 0;
       statusBox.className = 'status';
-      statusBox.textContent = 'Загрузка...';
+      statusBox.textContent = 'Передача файла в приложение...';
       const formData = new FormData();
       formData.append('file', file);
-      try {{
-        const response = await fetch('/upload/{escaped_token}', {{ method: 'POST', body: formData }});
-        const data = await response.json().catch(() => ({{ message: 'Неизвестный ответ сервера' }}));
-        if (!response.ok || !data.ok) throw new Error(data.message || data.detail || 'Ошибка загрузки');
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/upload/{escaped_token}');
+      xhr.upload.onprogress = (progressEvent) => {{
+        if (!progressEvent.lengthComputable) return;
+        const percent = Math.round((progressEvent.loaded / progressEvent.total) * 100);
+        progress.value = percent;
+        statusBox.textContent = 'Передача файла в приложение: ' + percent + '%';
+      }};
+      xhr.upload.onload = () => {{
+        progress.removeAttribute('value');
+        statusBox.textContent = 'Файл передан. Идёт загрузка в Object Storage...';
+      }};
+      xhr.onload = () => {{
+        let data = {{}};
+        try {{ data = JSON.parse(xhr.responseText || '{{}}'); }} catch (_) {{ data = {{ message: 'Неизвестный ответ сервера' }}; }}
+        if (xhr.status < 200 || xhr.status >= 300 || data.ok === false) {{
+          fail(new Error(data.message || data.detail || 'Ошибка загрузки'));
+          return;
+        }}
+        progress.value = 100;
         statusBox.className = 'status ok';
         statusBox.textContent = 'Файл загружен.';
         fileInput.value = '';
-      }} catch (error) {{
+        submit.disabled = false;
+      }};
+      xhr.onerror = () => fail(new Error('network write error during upload'));
+      xhr.ontimeout = () => fail(new Error('timeout during upload'));
+      xhr.send(formData);
+      function fail(error) {{
+        progress.hidden = true;
         statusBox.className = 'status err';
         statusBox.textContent = error.message;
-      }} finally {{
         submit.disabled = false;
       }}
     }});

@@ -22,7 +22,8 @@ from app.models import (
     StatusResponse,
 )
 from app.object_key import build_object_key, normalize_prefix
-from app.storage import StorageError, YandexStorageClient, upload_bytes_via_client
+from app.storage import StorageError, YandexStorageClient
+from app.upload_temp import EmptyUploadError, UploadTooLargeError, save_upload_to_temp
 from app.upload_tokens import DownloadTokenStore, UploadTokenStore
 
 
@@ -179,7 +180,14 @@ async def upload_direct(
 ) -> DirectUploadResponse:
     name = object_name.strip() or file.filename or "file"
     object_key = build_object_key(name, prefix or state.config.prefix, add_guid=add_guid, sanitize=sanitize)
-    result = state.storage().upload_direct(file.file, object_key, content_type=file.content_type or "")
+    try:
+        saved = await save_upload_to_temp(file)
+    except EmptyUploadError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        result = state.storage().upload_file(saved.path, object_key, content_type=file.content_type or "")
+    finally:
+        saved.cleanup()
     return DirectUploadResponse(object_key=result.object_key, size=result.size, etag=result.etag)
 
 
@@ -196,14 +204,18 @@ async def local_upload_submit(token: str, file: UploadFile = File(...)) -> Statu
     record = state.tokens.get(token)
     if record is None:
         raise HTTPException(status_code=404, detail="Ссылка недействительна или истекла")
-    data = await file.read()
-    if not data:
-        raise HTTPException(status_code=400, detail="Файл пустой")
     if record.expected_file_type and not _matches_mime(file.content_type or "", record.expected_file_type):
         raise HTTPException(status_code=400, detail="Выбран файл неподходящего типа")
-    if record.max_size_bytes and len(data) > record.max_size_bytes:
-        raise HTTPException(status_code=413, detail=f"Файл больше разрешённого лимита: {record.max_size_bytes} байт")
-    upload_bytes_via_client(state.storage(), record.object_key, data, content_type=record.content_type or file.content_type or "")
+    try:
+        saved = await save_upload_to_temp(file, max_size_bytes=record.max_size_bytes)
+    except EmptyUploadError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except UploadTooLargeError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    try:
+        state.storage().upload_file(saved.path, record.object_key, content_type=record.content_type or file.content_type or "")
+    finally:
+        saved.cleanup()
     state.tokens.mark_used(token)
     return StatusResponse(ok=True, message="Файл загружен")
 

@@ -1,15 +1,23 @@
 from __future__ import annotations
 
-import io
+import os
+import socket
+import ssl
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime
-from typing import BinaryIO
+from pathlib import Path
+from typing import BinaryIO, Callable
 
 import boto3
+from boto3.exceptions import S3UploadFailedError
+from boto3.s3.transfer import TransferConfig
+from botocore import UNSIGNED
 from botocore.client import Config as BotoConfig
 from botocore.exceptions import BotoCoreError, ClientError, NoCredentialsError
 
@@ -20,6 +28,33 @@ from app.models import ObjectInfo
 
 
 logger = get_logger(__name__)
+
+MULTIPART_CHUNK_SIZE = 8 * 1024 * 1024
+MULTIPART_THRESHOLD = 8 * 1024 * 1024
+TRANSFER_CONFIG = TransferConfig(
+    multipart_threshold=MULTIPART_THRESHOLD,
+    multipart_chunksize=MULTIPART_CHUNK_SIZE,
+    max_concurrency=3,
+    use_threads=True,
+)
+BOTO_RETRIES = {"max_attempts": 5, "mode": "standard"}
+BOTO_S3_OPTIONS = {"addressing_style": "path"}
+BOTO_SIGNED_CONFIG = BotoConfig(
+    signature_version="s3v4",
+    connect_timeout=30,
+    read_timeout=1800,
+    retries=BOTO_RETRIES,
+    s3=BOTO_S3_OPTIONS,
+)
+BOTO_IAM_CONFIG = BotoConfig(
+    signature_version=UNSIGNED,
+    connect_timeout=30,
+    read_timeout=1800,
+    retries=BOTO_RETRIES,
+    s3=BOTO_S3_OPTIONS,
+)
+
+ProgressCallback = Callable[[int, int | None], None]
 
 
 class StorageError(RuntimeError):
@@ -58,8 +93,23 @@ class YandexStorageClient:
     def list_objects(self, prefix: str = "") -> list[ObjectInfo]:
         return self.backend.list_objects(prefix)
 
-    def upload_direct(self, file_obj: BinaryIO, object_key: str, content_type: str = "") -> UploadResult:
-        return self.backend.upload_direct(file_obj, object_key, content_type)
+    def upload_direct(
+        self,
+        file_obj: BinaryIO,
+        object_key: str,
+        content_type: str = "",
+        progress_callback: ProgressCallback | None = None,
+    ) -> UploadResult:
+        return self.backend.upload_direct(file_obj, object_key, content_type, progress_callback)
+
+    def upload_file(
+        self,
+        file_path: str | Path,
+        object_key: str,
+        content_type: str = "",
+        progress_callback: ProgressCallback | None = None,
+    ) -> UploadResult:
+        return self.backend.upload_file(file_path, object_key, content_type, progress_callback)
 
     def download_object(self, object_key: str) -> DownloadResult:
         return self.backend.download_object(object_key)
@@ -78,8 +128,24 @@ class StorageBackend:
     def list_objects(self, prefix: str = "") -> list[ObjectInfo]:
         raise NotImplementedError
 
-    def upload_direct(self, file_obj: BinaryIO, object_key: str, content_type: str = "") -> UploadResult:
+    def upload_direct(
+        self,
+        file_obj: BinaryIO,
+        object_key: str,
+        content_type: str = "",
+        progress_callback: ProgressCallback | None = None,
+    ) -> UploadResult:
         raise NotImplementedError
+
+    def upload_file(
+        self,
+        file_path: str | Path,
+        object_key: str,
+        content_type: str = "",
+        progress_callback: ProgressCallback | None = None,
+    ) -> UploadResult:
+        with Path(file_path).open("rb") as file_obj:
+            return self.upload_direct(file_obj, object_key, content_type, progress_callback)
 
     def download_object(self, object_key: str) -> DownloadResult:
         raise NotImplementedError
@@ -111,17 +177,74 @@ class IamHttpStorageBackend(StorageBackend):
         logger.info("object list ok bucket=%s prefix=%s count=%s", self.config.bucket, prefix, len(objects))
         return objects
 
-    def upload_direct(self, file_obj: BinaryIO, object_key: str, content_type: str = "") -> UploadResult:
+    def upload_direct(
+        self,
+        file_obj: BinaryIO,
+        object_key: str,
+        content_type: str = "",
+        progress_callback: ProgressCallback | None = None,
+    ) -> UploadResult:
         self.config.require_ready()
-        data = file_obj.read()
-        logger.info("direct upload start bucket=%s key=%s size=%s", self.config.bucket, object_key, len(data))
-        headers = {"Content-Length": str(len(data))}
-        if content_type:
-            headers["Content-Type"] = content_type
-        _body, response_headers, _status = self._request("PUT", self._object_url(object_key), data=data, headers=headers, expected={200, 201})
-        etag = (response_headers.get("ETag") or response_headers.get("etag") or "").strip('"')
-        logger.info("direct upload ok bucket=%s key=%s size=%s", self.config.bucket, object_key, len(data))
-        return UploadResult(object_key=object_key, size=len(data), etag=etag)
+        size = _fileobj_size(file_obj)
+        return self._upload_fileobj(file_obj, object_key, content_type, size, progress_callback)
+
+    def upload_file(
+        self,
+        file_path: str | Path,
+        object_key: str,
+        content_type: str = "",
+        progress_callback: ProgressCallback | None = None,
+    ) -> UploadResult:
+        self.config.require_ready()
+        path = Path(file_path)
+        size = path.stat().st_size
+        with path.open("rb") as file_obj:
+            return self._upload_fileobj(file_obj, object_key, content_type, size, progress_callback)
+
+    def _upload_fileobj(
+        self,
+        file_obj: BinaryIO,
+        object_key: str,
+        content_type: str,
+        size: int | None,
+        progress_callback: ProgressCallback | None,
+    ) -> UploadResult:
+        extra_args = _extra_args(content_type)
+        logger.info("object storage upload started auth=%s bucket=%s key=%s size=%s", self.config.auth_mode, self.config.bucket, object_key, size)
+        if size is not None and size >= MULTIPART_THRESHOLD:
+            logger.info(
+                "multipart upload started bucket=%s key=%s size=%s chunk_size=%s max_concurrency=%s",
+                self.config.bucket,
+                object_key,
+                size,
+                MULTIPART_CHUNK_SIZE,
+                TRANSFER_CONFIG.max_concurrency,
+            )
+        tracker = UploadProgressTracker(object_key, size, progress_callback)
+        started = time.monotonic()
+        try:
+            self._client().upload_fileobj(
+                file_obj,
+                self.config.bucket,
+                object_key,
+                ExtraArgs=extra_args or None,
+                Config=TRANSFER_CONFIG,
+                Callback=tracker,
+            )
+            head = self._client().head_object(Bucket=self.config.bucket, Key=object_key)
+            elapsed = time.monotonic() - started
+            result = UploadResult(
+                object_key=object_key,
+                size=int(head.get("ContentLength") or size or tracker.bytes_seen),
+                etag=(head.get("ETag") or "").strip('"'),
+            )
+            logger.info("upload completed bucket=%s key=%s size=%s elapsed=%.2fs", self.config.bucket, object_key, result.size, elapsed)
+            return result
+        except ConfigError:
+            raise
+        except (S3UploadFailedError, NoCredentialsError, ClientError, BotoCoreError, OSError, socket.timeout, TimeoutError, ssl.SSLError) as exc:
+            logger.exception("upload failed exception=%s bucket=%s key=%s", exc.__class__.__name__, self.config.bucket, object_key)
+            raise StorageError(_friendly_upload_exception(exc)) from exc
 
     def download_object(self, object_key: str) -> DownloadResult:
         self.config.require_ready()
@@ -166,6 +289,21 @@ class IamHttpStorageBackend(StorageBackend):
     def _object_url(self, object_key: str) -> str:
         return f"{self._bucket_url()}/{urllib.parse.quote(object_key, safe='/')}"
 
+    def _client(self):
+        client = boto3.client(
+            "s3",
+            endpoint_url=self.config.endpoint,
+            region_name=self.config.region,
+            aws_access_key_id="iam",
+            aws_secret_access_key="iam",
+            config=BOTO_IAM_CONFIG,
+        )
+        client.meta.events.register("before-send.s3", self._add_iam_authorization)
+        return client
+
+    def _add_iam_authorization(self, request, **_kwargs) -> None:
+        request.headers["Authorization"] = f"Bearer {self.token_provider.get_token()}"
+
 
 class LegacyStaticStorageBackend(StorageBackend):
     def __init__(self, config: AppConfig):
@@ -179,7 +317,7 @@ class LegacyStaticStorageBackend(StorageBackend):
             region_name=self.config.region,
             aws_access_key_id=self.config.access_key_id,
             aws_secret_access_key=self.config.secret_key,
-            config=BotoConfig(signature_version="s3v4"),
+            config=BOTO_SIGNED_CONFIG,
         )
 
     def test_connection(self) -> None:
@@ -247,24 +385,62 @@ class LegacyStaticStorageBackend(StorageBackend):
         except (NoCredentialsError, ClientError, BotoCoreError) as exc:
             raise StorageError(_safe_boto_message(exc, "Не удалось сгенерировать legacy download-ссылку")) from exc
 
-    def upload_direct(self, file_obj: BinaryIO, object_key: str, content_type: str = "") -> UploadResult:
-        extra_args = {}
-        if content_type:
-            extra_args["ContentType"] = content_type
+    def upload_direct(
+        self,
+        file_obj: BinaryIO,
+        object_key: str,
+        content_type: str = "",
+        progress_callback: ProgressCallback | None = None,
+    ) -> UploadResult:
+        extra_args = _extra_args(content_type)
+        size = _fileobj_size(file_obj)
         logger.info("legacy direct upload start bucket=%s key=%s", self.config.bucket, object_key)
+        if size is not None and size >= MULTIPART_THRESHOLD:
+            logger.info(
+                "multipart upload started bucket=%s key=%s size=%s chunk_size=%s max_concurrency=%s",
+                self.config.bucket,
+                object_key,
+                size,
+                MULTIPART_CHUNK_SIZE,
+                TRANSFER_CONFIG.max_concurrency,
+            )
+        tracker = UploadProgressTracker(object_key, size, progress_callback)
         try:
             client = self._client()
-            client.upload_fileobj(file_obj, self.config.bucket, object_key, ExtraArgs=extra_args or None)
+            client.upload_fileobj(
+                file_obj,
+                self.config.bucket,
+                object_key,
+                ExtraArgs=extra_args or None,
+                Config=TRANSFER_CONFIG,
+                Callback=tracker,
+            )
             head = client.head_object(Bucket=self.config.bucket, Key=object_key)
-            return UploadResult(
+            result = UploadResult(
                 object_key=object_key,
-                size=int(head.get("ContentLength") or 0),
+                size=int(head.get("ContentLength") or size or tracker.bytes_seen),
                 etag=(head.get("ETag") or "").strip('"'),
             )
+            logger.info("upload completed bucket=%s key=%s size=%s", self.config.bucket, object_key, result.size)
+            return result
         except ConfigError:
             raise
-        except (NoCredentialsError, ClientError, BotoCoreError) as exc:
-            raise StorageError(_safe_boto_message(exc, "Не удалось загрузить файл")) from exc
+        except (S3UploadFailedError, NoCredentialsError, ClientError, BotoCoreError, OSError, socket.timeout, TimeoutError, ssl.SSLError) as exc:
+            logger.exception("upload failed exception=%s bucket=%s key=%s", exc.__class__.__name__, self.config.bucket, object_key)
+            raise StorageError(_friendly_upload_exception(exc)) from exc
+
+    def upload_file(
+        self,
+        file_path: str | Path,
+        object_key: str,
+        content_type: str = "",
+        progress_callback: ProgressCallback | None = None,
+    ) -> UploadResult:
+        self.config.require_ready()
+        path = Path(file_path)
+        size = path.stat().st_size
+        with path.open("rb") as file_obj:
+            return self.upload_direct(file_obj, object_key, content_type, progress_callback)
 
     def download_object(self, object_key: str) -> DownloadResult:
         logger.info("legacy object download start bucket=%s key=%s", self.config.bucket, object_key)
@@ -279,24 +455,40 @@ class LegacyStaticStorageBackend(StorageBackend):
             raise StorageError(_safe_boto_message(exc, "Не удалось скачать объект")) from exc
 
 
-def upload_bytes_to_presigned_url(upload_url: str, data: bytes, content_type: str = "") -> None:
-    headers = {"Content-Length": str(len(data))}
-    if content_type:
-        headers["Content-Type"] = content_type
-    request = urllib.request.Request(upload_url, data=data, headers=headers, method="PUT")
+class UploadProgressTracker:
+    def __init__(self, object_key: str, total_bytes: int | None, callback: ProgressCallback | None = None) -> None:
+        self.object_key = object_key
+        self.total_bytes = total_bytes
+        self.callback = callback
+        self.bytes_seen = 0
+        self._last_logged = 0
+        self._lock = threading.Lock()
+
+    def __call__(self, bytes_amount: int) -> None:
+        with self._lock:
+            self.bytes_seen += bytes_amount
+            current = self.bytes_seen
+            should_log = current == self.total_bytes or current - self._last_logged >= MULTIPART_CHUNK_SIZE
+            if should_log:
+                self._last_logged = current
+                logger.info("uploaded bytes key=%s bytes=%s total=%s", self.object_key, current, self.total_bytes)
+        if self.callback:
+            self.callback(current, self.total_bytes)
+
+
+def _fileobj_size(file_obj: BinaryIO) -> int | None:
     try:
-        with urllib.request.urlopen(request, timeout=120) as response:
-            if response.status >= 400:
-                raise StorageError(f"Object Storage вернул HTTP {response.status}")
-    except urllib.error.HTTPError as exc:
-        body = exc.read(800).decode("utf-8", errors="replace")
-        raise StorageError(f"Object Storage вернул HTTP {exc.code}: {body}") from exc
-    except urllib.error.URLError as exc:
-        raise StorageError(f"Не удалось выполнить legacy upload по pre-signed URL: {exc.reason}") from exc
+        current = file_obj.tell()
+        file_obj.seek(0, os.SEEK_END)
+        size = file_obj.tell()
+        file_obj.seek(current, os.SEEK_SET)
+        return int(size)
+    except (AttributeError, OSError, ValueError):
+        return None
 
 
-def upload_bytes_via_client(client: YandexStorageClient, object_key: str, data: bytes, content_type: str = "") -> UploadResult:
-    return client.upload_direct(io.BytesIO(data), object_key, content_type)
+def _extra_args(content_type: str) -> dict[str, str]:
+    return {"ContentType": content_type} if content_type else {}
 
 
 def _parse_list_objects(body: bytes) -> list[ObjectInfo]:
@@ -365,6 +557,20 @@ def _safe_boto_message(exc: Exception, fallback: str) -> str:
     if isinstance(exc, NoCredentialsError):
         return "Не указаны legacy static access keys"
     return f"{fallback}: {exc}"
+
+
+def _friendly_upload_exception(exc: Exception) -> str:
+    text = str(exc) or exc.__class__.__name__
+    low = text.lower()
+    if isinstance(exc, (socket.timeout, TimeoutError)) or "timed out" in low or "timeout" in low:
+        return "timeout during upload: Object Storage не успел принять файл. Проверьте сеть и повторите загрузку."
+    if isinstance(exc, ssl.SSLError) or "_ssl.c" in low or "ssl" in low or "write" in low:
+        return "network write error during upload: соединение оборвалось при отправке файла. Повторите загрузку; multipart retry включён."
+    if isinstance(exc, ClientError):
+        return _safe_boto_message(exc, "object storage upload failed")
+    if isinstance(exc, NoCredentialsError):
+        return "object storage upload failed: не указаны credentials"
+    return f"object storage upload failed: {exc.__class__.__name__}: {text}"
 
 
 def _safe_url(url: str) -> str:

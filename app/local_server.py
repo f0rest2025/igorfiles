@@ -11,7 +11,8 @@ from fastapi.responses import HTMLResponse, Response
 from app.client_page import render_local_upload_page
 from app.config import AppConfig
 from app.diagnostics import get_logger
-from app.storage import StorageError, YandexStorageClient, upload_bytes_via_client
+from app.storage import StorageError, YandexStorageClient
+from app.upload_temp import EmptyUploadError, UploadTooLargeError, save_upload_to_temp
 from app.upload_tokens import DownloadTokenStore, UploadTokenStore
 
 
@@ -48,18 +49,21 @@ def create_local_app(state: LocalServerState) -> FastAPI:
         record = state.uploads.get(token)
         if record is None:
             raise HTTPException(status_code=404, detail="Upload token недействителен или истёк")
-        data = await file.read()
-        if not data:
-            raise HTTPException(status_code=400, detail="Файл пустой")
-        if record.max_size_bytes and len(data) > record.max_size_bytes:
-            raise HTTPException(status_code=413, detail=f"Файл больше разрешённого лимита: {record.max_size_bytes} байт")
         actual_content_type = file.content_type or ""
         if record.expected_file_type and not _matches_mime(actual_content_type, record.expected_file_type):
             raise HTTPException(status_code=400, detail="Выбран файл неподходящего типа")
         try:
-            result = upload_bytes_via_client(state.storage(), record.object_key, data, record.content_type or actual_content_type)
+            saved = await save_upload_to_temp(file, max_size_bytes=record.max_size_bytes)
+        except EmptyUploadError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except UploadTooLargeError as exc:
+            raise HTTPException(status_code=413, detail=str(exc)) from exc
+        try:
+            result = state.storage().upload_file(saved.path, record.object_key, record.content_type or actual_content_type)
         except StorageError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
+        finally:
+            saved.cleanup()
         state.uploads.mark_used(token)
         logger.info("client upload consume ok token=%s key=%s size=%s", _short_token(token), record.object_key, result.size)
         return {"ok": True, "message": "Файл загружен"}

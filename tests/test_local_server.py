@@ -11,3 +11,4 @@ def test_local_server_disables_uvicorn_logging_config_for_windowed_exe():
     config = uvicorn.Config(app, host=runner.host, port=runner.port, access_log=False, log_config=None)
 
     assert config.log_config is None
+

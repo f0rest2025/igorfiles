@@ -109,8 +109,9 @@ class DesktopApp(tk.Tk):
         threading.Thread(target=worker, daemon=True).start()
 
     def _task_error(self, status_var: tk.StringVar, exc: Exception) -> None:
-        status_var.set(str(exc))
-        messagebox.showerror("Ошибка", str(exc))
+        message = _error_text(exc)
+        status_var.set(message)
+        messagebox.showerror("Ошибка", message)
 
 
 class MainFrame(ttk.Frame):
@@ -328,6 +329,8 @@ class MainFrame(ttk.Frame):
         ttk.Button(actions, text="Загрузить", command=self.direct_upload).pack(side="left")
         ttk.Button(actions, text="Показать в списке файлов", command=self.show_direct_in_files).pack(side="left", padx=10)
         ttk.Label(tab, textvariable=self.status_direct, foreground="#5f6b7a").pack(anchor="w")
+        self.direct_progress = ttk.Progressbar(tab, maximum=100, mode="determinate")
+        self.direct_progress.pack(fill="x", pady=(8, 0))
         self.direct_object_key = tk.StringVar()
         _inline_entry(tab, "Object key", self.direct_object_key, width=90).pack(fill="x", pady=(12, 6))
         ttk.Button(tab, text="Копировать object key", command=lambda: self.copy_value(self.direct_object_key.get())).pack(anchor="w")
@@ -608,12 +611,24 @@ class MainFrame(ttk.Frame):
             sanitize=self.direct_sanitize.get(),
         )
         content_type = mimetypes.guess_type(path.name)[0] or ""
+        total_size = path.stat().st_size
+        self.direct_progress.configure(value=0)
+
+        def progress(done: int, total: int | None) -> None:
+            total = total or total_size
+
+            def update() -> None:
+                percent = min(100, int((done / total) * 100)) if total else 0
+                self.direct_progress.configure(value=percent)
+                self.status_direct.set(f"Загрузка в Object Storage: {percent}% ({_format_size(done)} / {_format_size(total)})")
+
+            self.app.after(0, update)
 
         def work():
-            with path.open("rb") as fh:
-                return self.app.storage().upload_direct(fh, object_key, content_type=content_type)
+            return self.app.storage().upload_file(path, object_key, content_type=content_type, progress_callback=progress)
 
         def done(result) -> None:
+            self.direct_progress.configure(value=100)
             self.app.last_direct_key = result.object_key
             self.direct_object_key.set(result.object_key)
             self.status_direct.set(f"Файл загружен, размер {_format_size(result.size)}")
@@ -711,6 +726,11 @@ def _sort_datetime(value: datetime | None) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value
+
+
+def _error_text(exc: Exception) -> str:
+    text = str(exc).strip()
+    return text or f"{exc.__class__.__name__}: ошибка без подробного сообщения"
 
 
 def run() -> None:
