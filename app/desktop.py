@@ -11,10 +11,15 @@ from tkinter.scrolledtext import ScrolledText
 
 from app.auth import AuthManager, AuthSession
 from app.client_page import build_data_upload_url
-from app.config import AppConfig, ConfigError, DEFAULT_ENDPOINT, DEFAULT_REGION
+from app.config import AppConfig, AuthMode, ConfigError, DEFAULT_ENDPOINT, DEFAULT_REGION, REGION_ENDPOINTS, auth_mode_label, endpoint_for_region
+from app.diagnostics import get_logger, log_path, setup_logging
+from app.local_server import LocalServerRunner, LocalServerState
 from app.object_key import build_object_key, normalize_prefix
 from app.secure_config import delete_secure_config, load_secure_config, save_secure_config, secure_config_path
 from app.storage import StorageError, YandexStorageClient
+
+
+logger = get_logger(__name__)
 
 
 class DesktopApp(tk.Tk):
@@ -29,6 +34,8 @@ class DesktopApp(tk.Tk):
         self.objects = []
         self.last_download_url = ""
         self.last_direct_key = ""
+        self.local_state = LocalServerState(lambda: self.config)
+        self.local_server: LocalServerRunner | None = None
         self._configure_style()
         self.show_auth()
 
@@ -67,7 +74,16 @@ class DesktopApp(tk.Tk):
         except ConfigError as exc:
             messagebox.showerror("Конфиг", str(exc))
             self.config = AppConfig()
+        setup_logging(self.config.debug)
+        logger.info("auth init ok user=%s mode=%s", session.username, self.config.auth_mode)
+        self.restart_local_server()
         self.show_main()
+
+    def restart_local_server(self) -> None:
+        if self.local_server:
+            self.local_server.stop()
+        self.local_server = LocalServerRunner(self.local_state, self.config.upload_server_bind_host, self.config.upload_server_port)
+        self.local_server.start()
 
     def show_main(self) -> None:
         self.clear_root()
@@ -212,19 +228,49 @@ class MainFrame(ttk.Frame):
         self.notebook.add(tab, text="Подключение")
         form = ttk.Frame(tab)
         form.pack(fill="x")
+        self.auth_mode = tk.StringVar(value=AuthMode.YC_CLI.value)
         self.access_key_id = tk.StringVar()
         self.secret_key = tk.StringVar()
         self.bucket = tk.StringVar()
         self.prefix = tk.StringVar()
         self.endpoint = tk.StringVar(value=DEFAULT_ENDPOINT)
         self.region = tk.StringVar(value=DEFAULT_REGION)
+        self.yc_profile = tk.StringVar()
+        self.service_account_key_path = tk.StringVar()
+        self.upload_server_bind_host = tk.StringVar(value="127.0.0.1")
+        self.upload_server_port = tk.StringVar(value="8765")
+        self.public_base_url = tk.StringVar(value="http://127.0.0.1:8765")
+        self.debug = tk.BooleanVar(value=False)
 
-        _grid_entry(form, "Access Key ID", self.access_key_id, 0, 0)
-        _grid_entry(form, "Secret Key", self.secret_key, 0, 1, show="*")
+        auth_group = ttk.Frame(form)
+        auth_group.grid(row=0, column=0, sticky="ew", padx=8, pady=7)
+        ttk.Label(auth_group, text="Способ аутентификации").pack(anchor="w")
+        ttk.Combobox(
+            auth_group,
+            textvariable=self.auth_mode,
+            state="readonly",
+            values=[AuthMode.YC_CLI.value, AuthMode.SERVICE_ACCOUNT_JSON.value, AuthMode.LEGACY_STATIC.value],
+        ).pack(fill="x")
+        self.auth_mode.trace_add("write", lambda *_: self.update_auth_hint())
+
+        region_group = ttk.Frame(form)
+        region_group.grid(row=0, column=1, sticky="ew", padx=8, pady=7)
+        ttk.Label(region_group, text="Region").pack(anchor="w")
+        ttk.Combobox(region_group, textvariable=self.region, values=list(REGION_ENDPOINTS), state="readonly").pack(fill="x")
+        self.region.trace_add("write", lambda *_: self.apply_region_endpoint())
+
         _grid_entry(form, "Bucket", self.bucket, 1, 0)
         _grid_entry(form, "Prefix", self.prefix, 1, 1)
         _grid_entry(form, "Endpoint", self.endpoint, 2, 0)
-        _grid_entry(form, "Region", self.region, 2, 1)
+        _grid_entry(form, "Yandex CLI profile", self.yc_profile, 2, 1)
+        _grid_entry(form, "Service account JSON path", self.service_account_key_path, 3, 0)
+        ttk.Button(form, text="Выбрать JSON", command=self.choose_service_account_json).grid(row=3, column=1, sticky="w", padx=8, pady=(25, 7))
+        _grid_entry(form, "Legacy Access Key ID", self.access_key_id, 4, 0)
+        _grid_entry(form, "Legacy Secret Key", self.secret_key, 4, 1, show="*")
+        _grid_entry(form, "Upload server bind host", self.upload_server_bind_host, 5, 0)
+        _grid_entry(form, "Upload server port", self.upload_server_port, 5, 1)
+        _grid_entry(form, "Public base URL для client links", self.public_base_url, 6, 0)
+        ttk.Checkbutton(form, text="Debug logs", variable=self.debug).grid(row=6, column=1, sticky="w", padx=8, pady=(25, 7))
 
         actions = ttk.Frame(tab)
         actions.pack(fill="x", pady=14)
@@ -232,6 +278,9 @@ class MainFrame(ttk.Frame):
         ttk.Button(actions, text="Применить", command=self.apply_config).pack(side="left", padx=8)
         ttk.Button(actions, text="Сохранить локально", command=self.save_config).pack(side="left", padx=8)
         ttk.Button(actions, text="Очистить", command=self.clear_config, style="Danger.TButton").pack(side="left", padx=8)
+        ttk.Label(tab, text=f"Логи: {log_path()}", foreground="#657286").pack(anchor="w")
+        self.auth_hint = tk.StringVar()
+        ttk.Label(tab, textvariable=self.auth_hint, foreground="#5f6b7a", wraplength=900).pack(anchor="w", pady=(8, 0))
         ttk.Label(tab, textvariable=self.status_connection, foreground="#5f6b7a").pack(anchor="w")
 
     def _files_tab(self) -> None:
@@ -285,6 +334,7 @@ class MainFrame(ttk.Frame):
         self.upload_expires = tk.StringVar(value="3600")
         self.upload_content_type = tk.StringVar()
         self.upload_expected_type = tk.StringVar()
+        self.upload_max_size_mb = tk.StringVar(value="100")
         self.upload_guid = tk.BooleanVar(value=True)
         self.upload_sanitize = tk.BooleanVar(value=True)
         _grid_entry(form, "Имя файла / object key", self.upload_name, 0, 0)
@@ -292,6 +342,7 @@ class MainFrame(ttk.Frame):
         _grid_entry(form, "Срок жизни, секунд", self.upload_expires, 1, 0)
         _grid_entry(form, "Content-Type", self.upload_content_type, 1, 1)
         _grid_entry(form, "Ожидаемый тип файла", self.upload_expected_type, 2, 0)
+        _grid_entry(form, "Максимальный размер, МБ", self.upload_max_size_mb, 2, 1)
         checks = ttk.Frame(tab)
         checks.pack(fill="x", pady=(10, 0))
         ttk.Checkbutton(checks, text="Добавить GUID к имени", variable=self.upload_guid).pack(side="left", padx=(0, 20))
@@ -302,14 +353,14 @@ class MainFrame(ttk.Frame):
         self.upload_object_key = tk.StringVar()
         _inline_entry(tab, "Итоговый object key", self.upload_object_key, width=90).pack(fill="x", pady=(12, 6))
         ttk.Button(tab, text="Копировать object key", command=lambda: self.copy_value(self.upload_object_key.get())).pack(anchor="w")
-        ttk.Label(tab, text="Клиентская HTML-ссылка для браузера").pack(anchor="w", pady=(12, 2))
-        self.upload_data_url = ScrolledText(tab, height=5, wrap="word")
-        self.upload_data_url.pack(fill="x")
-        ttk.Button(tab, text="Копировать HTML-ссылку", command=lambda: self.copy_text_widget(self.upload_data_url)).pack(anchor="w", pady=(5, 8))
-        ttk.Label(tab, text="Raw pre-signed PUT URL").pack(anchor="w", pady=(4, 2))
+        ttk.Label(tab, text="Client upload link").pack(anchor="w", pady=(12, 2))
+        self.upload_client_url = ScrolledText(tab, height=3, wrap="word")
+        self.upload_client_url.pack(fill="x")
+        ttk.Button(tab, text="Копировать client link", command=lambda: self.copy_text_widget(self.upload_client_url)).pack(anchor="w", pady=(5, 8))
+        ttk.Label(tab, text="Legacy raw pre-signed PUT URL").pack(anchor="w", pady=(4, 2))
         self.upload_url = ScrolledText(tab, height=5, wrap="word")
         self.upload_url.pack(fill="x")
-        ttk.Button(tab, text="Копировать raw URL", command=lambda: self.copy_text_widget(self.upload_url)).pack(anchor="w", pady=5)
+        ttk.Button(tab, text="Копировать legacy raw URL", command=lambda: self.copy_text_widget(self.upload_url)).pack(anchor="w", pady=5)
 
     def _download_tab(self) -> None:
         tab = ttk.Frame(self.notebook, padding=16)
@@ -359,17 +410,26 @@ class MainFrame(ttk.Frame):
 
     def fill_config(self) -> None:
         cfg = self.app.config
+        self.auth_mode.set(cfg.auth_mode)
         self.access_key_id.set(cfg.access_key_id)
         self.secret_key.set(cfg.secret_key)
         self.bucket.set(cfg.bucket)
         self.prefix.set(cfg.prefix)
-        self.endpoint.set(cfg.endpoint or DEFAULT_ENDPOINT)
         self.region.set(cfg.region or DEFAULT_REGION)
+        self.endpoint.set(cfg.endpoint or DEFAULT_ENDPOINT)
+        self.yc_profile.set(cfg.yc_profile)
+        self.service_account_key_path.set(cfg.service_account_key_path)
+        self.upload_server_bind_host.set(cfg.upload_server_bind_host)
+        self.upload_server_port.set(str(cfg.upload_server_port))
+        self.public_base_url.set(cfg.public_base_url)
+        self.debug.set(cfg.debug)
         self.files_prefix.set(cfg.prefix)
         self.upload_prefix.set(cfg.prefix)
         self.direct_prefix.set(cfg.prefix)
+        self.update_auth_hint()
 
     def read_config_form(self) -> AppConfig:
+        port = _read_port(self.upload_server_port.get())
         return AppConfig(
             access_key_id=self.access_key_id.get().strip(),
             secret_key=self.secret_key.get(),
@@ -377,10 +437,42 @@ class MainFrame(ttk.Frame):
             prefix=self.prefix.get().strip(),
             endpoint=self.endpoint.get().strip() or DEFAULT_ENDPOINT,
             region=self.region.get().strip() or DEFAULT_REGION,
+            auth_mode=self.auth_mode.get().strip() or AuthMode.YC_CLI.value,
+            yc_profile=self.yc_profile.get().strip(),
+            service_account_key_path=self.service_account_key_path.get().strip(),
+            upload_server_bind_host=self.upload_server_bind_host.get().strip() or "127.0.0.1",
+            upload_server_port=port,
+            public_base_url=self.public_base_url.get().strip() or f"http://127.0.0.1:{port}",
+            debug=self.debug.get(),
         )
 
+    def choose_service_account_json(self) -> None:
+        path = filedialog.askopenfilename(title="Service account authorized key JSON", filetypes=[("JSON", "*.json"), ("All files", "*.*")])
+        if path:
+            self.service_account_key_path.set(path)
+
+    def apply_region_endpoint(self) -> None:
+        self.endpoint.set(endpoint_for_region(self.region.get()))
+
+    def update_auth_hint(self) -> None:
+        mode = self.auth_mode.get()
+        if mode == AuthMode.YC_CLI.value:
+            text = "Основной режим: приложение получает IAM token через локальный Yandex Cloud CLI profile. Static S3 keys не нужны."
+        elif mode == AuthMode.SERVICE_ACCOUNT_JSON.value:
+            text = "Service account JSON используется только для получения IAM token через JWT exchange. Клиенту JSON и token не передаются."
+        else:
+            text = "Legacy static access key mode: оставлен только для совместимости. Он использует S3 signing/presigned URLs и менее надёжен."
+        self.auth_hint.set(f"{auth_mode_label(mode)}. {text}")
+
     def apply_config(self) -> None:
-        self.app.update_config(self.read_config_form(), preserve_blank_secret=True)
+        try:
+            config = self.read_config_form()
+        except ValueError as exc:
+            self.status_connection.set(str(exc))
+            return
+        self.app.update_config(config, preserve_blank_secret=True)
+        setup_logging(self.app.config.debug)
+        self.app.restart_local_server()
         self.fill_config()
         self.status_connection.set("Настройки применены")
 
@@ -388,8 +480,14 @@ class MainFrame(ttk.Frame):
         if self.app.session is None:
             self.status_connection.set("Сессия заблокирована")
             return
-        config = self.app.update_config(self.read_config_form(), preserve_blank_secret=True)
+        try:
+            config = self.app.update_config(self.read_config_form(), preserve_blank_secret=True)
+        except ValueError as exc:
+            self.status_connection.set(str(exc))
+            return
         path = save_secure_config(config, self.app.session)
+        setup_logging(self.app.config.debug)
+        self.app.restart_local_server()
         self.status_connection.set(f"Настройки сохранены: {path}")
 
     def clear_config(self) -> None:
@@ -397,11 +495,17 @@ class MainFrame(ttk.Frame):
             return
         self.app.config = AppConfig()
         delete_secure_config()
+        setup_logging(self.app.config.debug)
+        self.app.restart_local_server()
         self.fill_config()
         self.status_connection.set("Настройки очищены")
 
     def test_connection(self) -> None:
-        config = self.read_config_form()
+        try:
+            config = self.read_config_form()
+        except ValueError as exc:
+            self.status_connection.set(str(exc))
+            return
 
         def work() -> str:
             YandexStorageClient(self.app.config.merged_with(config, preserve_blank_secret=True)).test_connection()
@@ -484,6 +588,7 @@ class MainFrame(ttk.Frame):
             return
         try:
             expires = _read_int(self.upload_expires.get(), "Срок жизни")
+            max_size_bytes = _read_size_mb(self.upload_max_size_mb.get())
         except ValueError as exc:
             self.status_upload.set(str(exc))
             return
@@ -497,15 +602,30 @@ class MainFrame(ttk.Frame):
         )
 
         def work():
-            raw_url = self.app.storage().presign_upload(object_key, expires, content_type=content_type)
-            html_url = build_data_upload_url(raw_url, content_type=content_type, expected_file_type=expected_type)
-            return raw_url, html_url
+            legacy_url = ""
+            legacy_html = ""
+            if self.app.config.uses_legacy_static_keys:
+                legacy_url = self.app.storage().presign_upload(object_key, expires, content_type=content_type)
+                legacy_html = build_data_upload_url(legacy_url, content_type=content_type, expected_file_type=expected_type)
+            return legacy_url, legacy_html
 
         def done(result) -> None:
             raw_url, html_url = result
+            token = self.app.local_state.uploads.create(
+                object_key,
+                expires,
+                content_type=content_type,
+                expected_file_type=expected_type,
+                max_size_bytes=max_size_bytes,
+            )
+            logger.info("upload token generation key=%s ttl=%s max_size=%s", object_key, expires, max_size_bytes)
+            client_url = f"{self.app.config.public_base_url.rstrip('/')}/upload/{token.token}"
             self.upload_object_key.set(object_key)
-            _set_text(self.upload_url, raw_url)
-            _set_text(self.upload_data_url, html_url)
+            _set_text(self.upload_client_url, client_url)
+            legacy_text = raw_url or "Недоступно в IAM mode. Основной сценарий: backend-mediated upload link выше."
+            if html_url:
+                legacy_text += "\n\nLegacy HTML data URL:\n" + html_url
+            _set_text(self.upload_url, legacy_text)
             expires_at = datetime.now(UTC) + timedelta(seconds=expires)
             self.status_upload.set(f"Ссылка действует до {expires_at:%Y-%m-%d %H:%M:%S UTC}")
 
@@ -523,11 +643,20 @@ class MainFrame(ttk.Frame):
             return
 
         def work():
-            return self.app.storage().presign_download(object_key, expires)
+            legacy_url = ""
+            if self.app.config.uses_legacy_static_keys:
+                legacy_url = self.app.storage().presign_download(object_key, expires)
+            return legacy_url
 
-        def done(url: str) -> None:
+        def done(legacy_url: str) -> None:
+            token = self.app.local_state.downloads.create(object_key, expires)
+            logger.info("download link generation key=%s ttl=%s", object_key, expires)
+            url = f"{self.app.config.public_base_url.rstrip('/')}/download/{token.token}"
             self.app.last_download_url = url
-            _set_text(self.download_url, url)
+            text = url
+            if legacy_url:
+                text += "\n\nLegacy presigned GET URL:\n" + legacy_url
+            _set_text(self.download_url, text)
             expires_at = datetime.now(UTC) + timedelta(seconds=expires)
             self.status_download.set(f"Ссылка действует до {expires_at:%Y-%m-%d %H:%M:%S UTC}")
 
@@ -638,6 +767,26 @@ def _read_int(value: str, label: str) -> int:
     if number < 60 or number > 604800:
         raise ValueError(f"{label}: допустимо от 60 до 604800 секунд")
     return number
+
+
+def _read_port(value: str) -> int:
+    try:
+        port = int(value)
+    except ValueError as exc:
+        raise ValueError("Upload server port: введите целое число") from exc
+    if port < 1 or port > 65535:
+        raise ValueError("Upload server port: допустимо от 1 до 65535")
+    return port
+
+
+def _read_size_mb(value: str) -> int:
+    try:
+        mb = float((value or "0").replace(",", "."))
+    except ValueError as exc:
+        raise ValueError("Максимальный размер: введите число в МБ") from exc
+    if mb < 0:
+        raise ValueError("Максимальный размер не может быть отрицательным")
+    return int(mb * 1024 * 1024)
 
 
 def _format_size(size: int) -> str:

@@ -60,7 +60,7 @@ def render_local_upload_page(token: str, expires_at: str) -> str:
       try {{
         const response = await fetch('/upload/{escaped_token}', {{ method: 'POST', body: formData }});
         const data = await response.json().catch(() => ({{ message: 'Неизвестный ответ сервера' }}));
-        if (!response.ok || !data.ok) throw new Error(data.message || 'Ошибка загрузки');
+        if (!response.ok || !data.ok) throw new Error(data.message || data.detail || 'Ошибка загрузки');
         statusBox.className = 'status ok';
         statusBox.textContent = 'Файл загружен.';
         fileInput.value = '';

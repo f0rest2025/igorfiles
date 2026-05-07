@@ -11,7 +11,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 from app.auth import AuthSession
-from app.config import AppConfig, ConfigError, DEFAULT_ENDPOINT, DEFAULT_REGION, default_config_path
+from app.config import AppConfig, AuthMode, ConfigError, default_config_path
 
 
 SECURE_CONFIG_FILE_NAME = "desktop_config.secure.json"
@@ -39,23 +39,20 @@ def load_secure_config(session: AuthSession, path: Path | None = None) -> AppCon
         except InvalidToken as exc:
             raise ConfigError("Не удалось расшифровать Secret Key. Проверьте пароль входа.") from exc
 
-    return AppConfig(
-        access_key_id=str(raw.get("access_key_id") or "").strip(),
-        secret_key=secret_key,
-        bucket=str(raw.get("bucket") or "").strip(),
-        prefix=str(raw.get("prefix") or "").strip(),
-        endpoint=str(raw.get("endpoint") or DEFAULT_ENDPOINT).strip() or DEFAULT_ENDPOINT,
-        region=str(raw.get("region") or DEFAULT_REGION).strip() or DEFAULT_REGION,
-    )
+    raw["secret_key"] = secret_key
+    return AppConfig.from_mapping(raw)
 
 
 def save_secure_config(config: AppConfig, session: AuthSession, path: Path | None = None) -> Path:
     path = path or secure_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     raw: dict[str, Any] = asdict(config)
-    raw["version"] = 1
+    raw["version"] = 2
     raw["secret_key_encrypted"] = ""
-    if config.secret_key:
+    if config.auth_mode != AuthMode.LEGACY_STATIC.value:
+        raw["access_key_id"] = ""
+        raw["secret_key"] = ""
+    if config.auth_mode == AuthMode.LEGACY_STATIC.value and config.secret_key:
         raw["secret_key_encrypted"] = _fernet(session).encrypt(config.secret_key.encode("utf-8")).decode("utf-8")
     raw.pop("secret_key", None)
 
@@ -87,4 +84,3 @@ def _fernet(session: AuthSession) -> Fernet:
     )
     key = base64.urlsafe_b64encode(kdf.derive(session.password.encode("utf-8")))
     return Fernet(key)
-

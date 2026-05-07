@@ -4,69 +4,131 @@ import json
 import os
 import sys
 from dataclasses import asdict, dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
 
 APP_DIR_NAME = "YandexStorageFileManager"
-DEFAULT_ENDPOINT = "https://storage.yandexcloud.net"
+REGION_ENDPOINTS = {
+    "ru-central1": "https://storage.yandexcloud.net",
+    "kz1": "https://storage.yandexcloud.kz",
+}
 DEFAULT_REGION = "ru-central1"
+DEFAULT_ENDPOINT = REGION_ENDPOINTS[DEFAULT_REGION]
+
+
+class AuthMode(StrEnum):
+    YC_CLI = "yc_cli"
+    SERVICE_ACCOUNT_JSON = "service_account_json"
+    LEGACY_STATIC = "legacy_static"
 
 
 @dataclass(slots=True)
 class AppConfig:
+    version: int = 2
     access_key_id: str = ""
     secret_key: str = ""
     bucket: str = ""
     prefix: str = ""
     endpoint: str = DEFAULT_ENDPOINT
     region: str = DEFAULT_REGION
+    auth_mode: str = AuthMode.YC_CLI.value
+    yc_profile: str = ""
+    service_account_key_path: str = ""
+    upload_server_bind_host: str = "127.0.0.1"
+    upload_server_port: int = 8765
+    public_base_url: str = "http://127.0.0.1:8765"
+    debug: bool = False
 
     @classmethod
     def from_mapping(cls, raw: dict[str, Any] | None) -> "AppConfig":
         raw = raw or {}
+        region = str(raw.get("region") or DEFAULT_REGION).strip() or DEFAULT_REGION
+        endpoint = str(raw.get("endpoint") or endpoint_for_region(region)).strip() or endpoint_for_region(region)
+        auth_mode_raw = raw.get("auth_mode")
+        if auth_mode_raw:
+            auth_mode = str(auth_mode_raw).strip()
+        elif raw.get("access_key_id") or raw.get("secret_key"):
+            auth_mode = AuthMode.LEGACY_STATIC.value
+        else:
+            auth_mode = AuthMode.YC_CLI.value
+        if auth_mode not in {mode.value for mode in AuthMode}:
+            auth_mode = AuthMode.YC_CLI.value
         return cls(
+            version=int(raw.get("version") or 2),
             access_key_id=str(raw.get("access_key_id") or "").strip(),
             secret_key=str(raw.get("secret_key") or ""),
             bucket=str(raw.get("bucket") or "").strip(),
             prefix=str(raw.get("prefix") or "").strip(),
-            endpoint=str(raw.get("endpoint") or DEFAULT_ENDPOINT).strip() or DEFAULT_ENDPOINT,
-            region=str(raw.get("region") or DEFAULT_REGION).strip() or DEFAULT_REGION,
+            endpoint=endpoint,
+            region=region,
+            auth_mode=auth_mode,
+            yc_profile=str(raw.get("yc_profile") or "").strip(),
+            service_account_key_path=str(raw.get("service_account_key_path") or "").strip(),
+            upload_server_bind_host=str(raw.get("upload_server_bind_host") or "127.0.0.1").strip() or "127.0.0.1",
+            upload_server_port=_safe_port(raw.get("upload_server_port")),
+            public_base_url=str(raw.get("public_base_url") or "http://127.0.0.1:8765").strip() or "http://127.0.0.1:8765",
+            debug=bool(raw.get("debug") or False),
         )
 
     def merged_with(self, update: "AppConfig", preserve_blank_secret: bool = True) -> "AppConfig":
         secret_key = update.secret_key
-        if preserve_blank_secret and not secret_key:
+        if update.auth_mode != AuthMode.LEGACY_STATIC.value:
+            secret_key = ""
+        elif preserve_blank_secret and not secret_key:
             secret_key = self.secret_key
         return AppConfig(
-            access_key_id=update.access_key_id,
+            version=2,
+            access_key_id=update.access_key_id if update.auth_mode == AuthMode.LEGACY_STATIC.value else "",
             secret_key=secret_key,
             bucket=update.bucket,
             prefix=update.prefix,
-            endpoint=update.endpoint or DEFAULT_ENDPOINT,
+            endpoint=update.endpoint or endpoint_for_region(update.region),
             region=update.region or DEFAULT_REGION,
+            auth_mode=update.auth_mode or AuthMode.YC_CLI.value,
+            yc_profile=update.yc_profile,
+            service_account_key_path=update.service_account_key_path,
+            upload_server_bind_host=update.upload_server_bind_host or "127.0.0.1",
+            upload_server_port=update.upload_server_port or 8765,
+            public_base_url=update.public_base_url or f"http://{update.upload_server_bind_host or '127.0.0.1'}:{update.upload_server_port or 8765}",
+            debug=update.debug,
         )
 
     def public_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["secret_key"] = ""
         data["has_secret_key"] = bool(self.secret_key)
+        data["auth_mode_label"] = auth_mode_label(self.auth_mode)
         return data
 
     def require_ready(self) -> None:
         missing = [
             name
             for name, value in {
-                "Access Key ID": self.access_key_id,
-                "Secret Key": self.secret_key,
                 "Bucket": self.bucket,
                 "Endpoint": self.endpoint,
                 "Region": self.region,
             }.items()
             if not value
         ]
+        if self.auth_mode == AuthMode.LEGACY_STATIC.value:
+            if not self.access_key_id:
+                missing.append("Access Key ID")
+            if not self.secret_key:
+                missing.append("Secret Key")
+        elif self.auth_mode == AuthMode.SERVICE_ACCOUNT_JSON.value and not self.service_account_key_path:
+            missing.append("Service account JSON")
+        elif self.auth_mode == AuthMode.YC_CLI.value:
+            pass
+        else:
+            missing.append("Способ аутентификации")
         if missing:
             raise ConfigError("Не заполнены поля подключения: " + ", ".join(missing))
+
+    @property
+    def uses_legacy_static_keys(self) -> bool:
+        return self.auth_mode == AuthMode.LEGACY_STATIC.value
 
 
 class ConfigError(RuntimeError):
@@ -124,3 +186,25 @@ def mask_secret(value: str) -> str:
         return "***"
     return f"{value[:3]}***{value[-3:]}"
 
+
+def endpoint_for_region(region: str) -> str:
+    return REGION_ENDPOINTS.get((region or "").strip(), DEFAULT_ENDPOINT)
+
+
+def auth_mode_label(auth_mode: str) -> str:
+    labels = {
+        AuthMode.YC_CLI.value: "Yandex CLI profile / IAM token",
+        AuthMode.SERVICE_ACCOUNT_JSON.value: "Service account JSON / IAM token",
+        AuthMode.LEGACY_STATIC.value: "Legacy static access key",
+    }
+    return labels.get(auth_mode, auth_mode)
+
+
+def _safe_port(value: Any) -> int:
+    try:
+        port = int(value or 8765)
+    except (TypeError, ValueError):
+        return 8765
+    if port < 1 or port > 65535:
+        return 8765
+    return port

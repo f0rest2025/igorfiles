@@ -3,7 +3,7 @@ import json
 import pytest
 
 from app.auth import AuthManager
-from app.config import AppConfig, ConfigError
+from app.config import AppConfig, AuthMode, ConfigError
 from app.secure_config import load_secure_config, save_secure_config
 
 
@@ -41,6 +41,7 @@ def test_secure_config_encrypts_secret_key(tmp_path):
         prefix="incoming",
         endpoint="https://storage.yandexcloud.net",
         region="ru-central1",
+        auth_mode=AuthMode.LEGACY_STATIC.value,
     )
 
     save_secure_config(config, session, path)
@@ -53,4 +54,3 @@ def test_secure_config_encrypts_secret_key(tmp_path):
     loaded = load_secure_config(session, path)
     assert loaded.secret_key == "secret-value"
     assert loaded.bucket == "bucket"
-

@@ -5,19 +5,27 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from app.config import DEFAULT_ENDPOINT, DEFAULT_REGION
+from app.config import AuthMode, DEFAULT_ENDPOINT, DEFAULT_REGION
 
 
 MAX_EXPIRES_IN = 604800
 
 
 class ConfigPayload(BaseModel):
+    version: int = 2
     access_key_id: str = ""
     secret_key: str = ""
     bucket: str = ""
     prefix: str = ""
     endpoint: str = DEFAULT_ENDPOINT
     region: str = DEFAULT_REGION
+    auth_mode: str = AuthMode.YC_CLI.value
+    yc_profile: str = ""
+    service_account_key_path: str = ""
+    upload_server_bind_host: str = "127.0.0.1"
+    upload_server_port: int = 8765
+    public_base_url: str = "http://127.0.0.1:8765"
+    debug: bool = False
 
 
 class StatusResponse(BaseModel):
@@ -54,13 +62,14 @@ class PresignUploadRequest(ExpiresMixin):
     add_guid: bool = True
     sanitize: bool = True
     expected_file_type: str = ""
+    max_size_bytes: int = Field(default=0, ge=0)
 
 
 class PresignUploadResponse(BaseModel):
     object_key: str
-    upload_url: str
     client_url: str
-    client_data_url: str
+    upload_url: str = ""
+    client_data_url: str = ""
     expires_at: datetime
 
 

@@ -1,84 +1,109 @@
 # Yandex Object Storage Manager
 
-Desktop-приложение для оператора, который принимает файлы от клиентов в Yandex Object Storage и выдаёт безопасные временные ссылки. Работает на Windows и Linux, не требует Docker, внешней БД или многопользовательского сервера.
+Desktop-приложение для оператора под Windows/Linux, которое работает с Yandex Object Storage без обязательного ввода static access key / secret key. Основной сценарий использует IAM token и локальный backend-mediated upload flow: клиент загружает файл только в `/upload/<token>`, а приложение само отправляет объект в bucket от имени оператора.
 
-## Что изменилось во второй версии
+## Новая архитектура auth
 
-- операторский интерфейс стал desktop-приложением на Python/Tkinter;
-- добавлена локальная авторизация оператора;
-- при первом запуске создаётся локальный администратор;
-- пароль хранится не открытым текстом, а как PBKDF2-SHA256 hash;
-- `Secret Key` сохраняется в desktop-конфиге в зашифрованном виде;
-- прежний сервисный слой `boto3` и логика Object Storage сохранены.
+Основной режим:
 
-## Архитектура
+- `Yandex CLI profile / IAM token`;
+- приложение вызывает локальный `yc iam create-token`;
+- HTTP-запросы к Object Storage идут с заголовком `Authorization: Bearer <IAM token>`;
+- S3 request signing не используется, поэтому основной поток не зависит от AWS Signature V4 и не должен падать с `SignatureDoesNotMatch`.
 
-Основной запуск теперь:
+Альтернативный режим:
 
-```bash
-python -m app
-```
+- `Service account JSON / IAM token`;
+- приложение читает authorized key JSON, создаёт JWT `PS256`, меняет его на IAM token через IAM API;
+- service account JSON не отправляется клиенту.
 
-Desktop-приложение напрямую использует слой `YandexStorageClient` и выполняет:
+Legacy-режим:
 
-- проверку подключения к bucket;
-- просмотр списка объектов;
-- генерацию pre-signed `PUT` URL для загрузки;
-- генерацию клиентской HTML-ссылки `data:` для браузерной загрузки;
-- генерацию pre-signed `GET` URL для скачивания;
-- прямую загрузку файла оператором.
+- `Legacy static access key`;
+- оставлен только для совместимости;
+- использует `boto3`, static access key / secret key, presigned PUT/GET;
+- явно считается менее надёжным режимом.
 
-Старый FastAPI backend оставлен в коде как совместимый вариант и может запускаться отдельно:
+## Почему IAM token
 
-```bash
-python -m uvicorn app.main:app --host 127.0.0.1 --port 8765
-```
+Yandex Object Storage S3 API поддерживает IAM token authentication. При IAM token запросы не нужно подписывать AWS Signature V4, достаточно Bearer token. Это убирает основной источник ошибок `SignatureDoesNotMatch`, которые часто появляются при presigned PUT: неверный region, endpoint, content-type, canonical request, clock skew или несовпадение заголовков.
 
-## Готовый установщик Windows 11 с GitHub
+## Клиентская загрузка
 
-В проект добавлена GitHub Actions-сборка `.github/workflows/windows-installer.yml`.
+Новый основной сценарий:
 
-Как получить установщик:
-
-1. Загрузите исходники в GitHub-репозиторий.
-2. Откройте вкладку `Actions`.
-3. Запустите workflow `Windows installer` вручную через `Run workflow` или сделайте push в `main`.
-4. После сборки откройте завершённый workflow run.
-5. Внизу страницы скачайте artifact `YandexStorageManagerSetup-0.2.0`.
-
-Чтобы установщик появился именно в `Releases`, создайте и отправьте тег:
-
-```bash
-git tag v0.2.0
-git push origin main
-git push origin v0.2.0
-```
-
-После этого GitHub Actions создаст Release `v0.2.0` и прикрепит файл:
+1. Оператор задаёт object key/prefix/TTL/тип файла/лимит размера.
+2. Приложение создаёт одноразовый upload session token.
+3. Оператор копирует ссылку вида:
 
 ```text
-YandexStorageManagerSetup-0.2.0.exe
+http://127.0.0.1:8765/upload/<token>
 ```
 
-Этот `.exe` можно скачать с GitHub и установить на Windows 11. Установка выполняется в профиль пользователя, без прав администратора.
+4. Клиент открывает страницу, видит только выбор файла, кнопку загрузки и статус.
+5. Клиент отправляет файл в локальный backend приложения.
+6. Backend проверяет token, TTL, размер и тип файла.
+7. Backend загружает файл в Object Storage через выбранный IAM/legacy backend.
 
-## Установка из исходников
+Клиент не получает:
+
+- IAM token;
+- static access key / secret key;
+- bucket;
+- список объектов;
+- download/admin API.
+
+Важно: если клиент находится не на компьютере оператора, `public_base_url` должен указывать на адрес, по которому клиент реально видит локальный backend: LAN IP, VPN/tunnel или reverse proxy. По умолчанию backend слушает `127.0.0.1:8765`.
+
+## Регионы
+
+Поддержаны пресеты:
+
+- RU: `region = ru-central1`, `endpoint = https://storage.yandexcloud.net`
+- KZ: `region = kz1`, `endpoint = https://storage.yandexcloud.kz`
+
+Endpoint можно переопределить вручную.
+
+## Установщик Windows 11 с GitHub
+
+В проекте есть GitHub Actions workflow:
+
+```text
+.github/workflows/windows-installer.yml
+```
+
+Он на `windows-latest`:
+
+- ставит Python 3.11;
+- ставит зависимости;
+- запускает smoke tests;
+- собирает desktop `.exe` через PyInstaller;
+- собирает установщик через Inno Setup;
+- публикует artifact;
+- при теге `v*` создаёт GitHub Release.
+
+Чтобы получить Release с установщиком:
+
+```bash
+git push origin main
+git tag v0.3.0
+git push origin v0.3.0
+```
+
+После сборки в GitHub Releases появится:
+
+```text
+YandexStorageManagerSetup-0.3.0.exe
+```
+
+## Запуск из исходников
 
 ### Windows 10/11
-
-1. Установите Python 3.11+.
-2. Откройте PowerShell в папке проекта.
-3. Создайте окружение и установите зависимости:
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-```
-
-4. Запустите desktop-приложение:
-
-```powershell
 .\run_windows.bat
 ```
 
@@ -91,32 +116,45 @@ pip install -r requirements.txt
 sh run_linux.sh
 ```
 
-Если в Linux не установлен Tkinter:
+Если Tkinter не установлен:
 
 ```bash
 sudo apt install python3-tk
 ```
 
-## Первый запуск и авторизация
+## Настройка подключения
 
-При первом запуске приложение попросит создать локального администратора:
+Поля:
 
-- логин;
-- пароль;
-- повтор пароля.
+- Bucket;
+- Prefix;
+- Region;
+- Endpoint;
+- способ аутентификации;
+- Yandex CLI profile;
+- Service account JSON path;
+- Legacy Access Key ID / Secret Key;
+- upload server bind host;
+- upload server port;
+- public base URL;
+- debug logs.
 
-Минимальная политика пароля:
+Для основного режима достаточно:
 
-- не короче 8 символов;
-- содержит букву;
-- содержит цифру;
-- не начинается и не заканчивается пробелом.
+- установить и инициализировать Yandex Cloud CLI;
+- выбрать `yc_cli`;
+- указать profile, если используется не default;
+- указать bucket/prefix/region/endpoint;
+- нажать «Проверить подключение».
 
-После входа доступны вкладки оператора. Кнопка «Заблокировать» закрывает рабочий интерфейс и возвращает экран входа. Кнопка «Сменить пароль» меняет пароль и пере-шифровывает сохранённый `Secret Key`.
+Для service account JSON:
 
-## Локальные файлы безопасности
+- создайте service account authorized key JSON;
+- выдайте service account права на bucket, например `storage.viewer` для списка/скачивания и `storage.editor` для загрузки;
+- выберите файл JSON в GUI;
+- проверьте подключение.
 
-Файлы хранятся отдельно от исходников.
+## Локальные файлы
 
 Windows:
 
@@ -130,80 +168,37 @@ Linux:
 ~/.config/yandex-storage-file-manager/
 ```
 
-Основные файлы:
+Файлы:
 
-- `auth.json` - логин, salt, PBKDF2 hash, параметры KDF;
-- `desktop_config.secure.json` - настройки подключения, где `Secret Key` зашифрован;
-- `config.json` - legacy-конфиг старой web-версии, desktop-версия его не использует для хранения секрета.
+- `auth.json` - локальный пользователь, salt, PBKDF2 hash;
+- `desktop_config.secure.json` - operator config;
+- `app.log` - безопасные логи;
+- `config.json` - legacy web config, если старый web-режим использовался.
 
-Путь legacy-конфига можно переопределить переменной `YOS_MANAGER_CONFIG`; desktop-файлы лежат рядом с ним.
+В `yc_cli` режиме static secrets не сохраняются. В `service_account_json` режиме сохраняется путь к JSON, сам JSON остаётся в выбранном месте. В `legacy_static` режиме secret key шифруется локальным паролем оператора.
 
-## Основные сценарии
+## Диагностика
 
-### Подключение
+Логируются этапы:
 
-Откройте вкладку «Подключение», заполните:
+- auth init;
+- token acquire;
+- bucket check;
+- object list;
+- direct upload;
+- upload token generation;
+- client upload consume;
+- download link generation.
 
-- Access Key ID;
-- Secret Key;
-- Bucket;
-- Prefix;
-- Endpoint;
-- Region.
+Не логируются открыто:
 
-Endpoint по умолчанию:
+- password;
+- private key;
+- secret key;
+- полный IAM bearer token;
+- JWT.
 
-```text
-https://storage.yandexcloud.net
-```
-
-Region по умолчанию:
-
-```text
-ru-central1
-```
-
-Нажмите «Проверить подключение». При успехе приложение выполняет `head_bucket`.
-
-### Список файлов
-
-Вкладка «Файлы» показывает:
-
-- object key;
-- размер;
-- дату изменения;
-- storage class;
-- etag.
-
-Доступны обновление, поиск, фильтр по prefix, сортировка, копирование object key и переход к генерации download-ссылки.
-
-### Upload-ссылка для клиента
-
-Вкладка «Ссылка на загрузку» формирует object key и создаёт pre-signed `PUT` URL. Можно указать:
-
-- имя файла / object key;
-- prefix;
-- срок жизни;
-- content-type;
-- ожидаемый тип файла;
-- добавление GUID;
-- санитизацию имени.
-
-Результат:
-
-- итоговый object key;
-- клиентская HTML-ссылка `data:` для браузера;
-- raw pre-signed `PUT` URL.
-
-Клиентская HTML-ссылка не содержит ключей оператора и не показывает список файлов. Для прямой browser-загрузки bucket может требовать CORS для `PUT`.
-
-### Download-ссылка
-
-Вкладка «Ссылка на скачивание» генерирует pre-signed `GET` URL только для выбранного object key. Эта ссылка показывается только оператору.
-
-### Прямая загрузка оператором
-
-Вкладка «Прямая загрузка» позволяет выбрать локальный файл и загрузить его в bucket напрямую из приложения.
+Debug-режим включается в GUI.
 
 ## Smoke tests
 
@@ -214,31 +209,32 @@ pytest
 
 Покрыто:
 
-- запуск сервисного health handler;
-- валидация входных параметров;
-- формирование object key;
-- генерация pre-signed URL через mock;
-- обработка ошибок подключения;
-- локальная авторизация;
-- шифрование `Secret Key` в desktop-конфиге.
+- local auth;
+- secure config;
+- RU/KZ endpoint config;
+- migration старого static config в legacy mode;
+- upload token одноразовость;
+- object key generation;
+- legacy presigned mock;
+- XML parsing для IAM HTTP list objects;
+- FastAPI health handler.
 
-## Безопасность
+## Legacy-части
 
-- пароль оператора не хранится открытым текстом;
-- для пароля используется PBKDF2-SHA256 с salt;
-- `Secret Key` шифруется через `cryptography.Fernet`;
-- секреты не выводятся в лог;
-- клиентские ссылки не содержат operator credentials;
-- upload-ссылка ограничена временем, HTTP-методом `PUT` и конкретным object key;
-- нет удаления, переименования, регистрации клиентов, БД и телеметрии.
+Оставлены только для совместимости:
 
-Ограничение S3 pre-signed `PUT`: raw-ссылка не является одноразовой и до истечения срока может перезаписать тот же object key. Для практической защиты включайте GUID и задавайте короткий TTL.
+- старый FastAPI operator web UI;
+- static access key fields;
+- `boto3` legacy backend;
+- presigned PUT/GET generation;
+- legacy `data:` HTML upload page.
 
-## Улучшения для следующей итерации
+Новый основной сценарий desktop GUI не отдаёт клиенту presigned PUT URL и не требует static access key.
 
-- сборка Windows `.exe` через PyInstaller;
-- настройка CORS bucket из интерфейса;
-- pre-signed POST policy с ограничением размера файла;
-- журнал действий без секретов;
-- хранение ключей через Windows Credential Manager / Linux Secret Service;
-- отдельная публичная upload-страница для клиентов из интернета.
+## Известные ограничения
+
+- Backend-mediated upload требует, чтобы клиент мог достучаться до `public_base_url`.
+- Local upload/download tokens хранятся в памяти и сбрасываются при перезапуске приложения.
+- Service account JSON является чувствительным файлом; приложение хранит путь, но сам файл нужно защищать на диске.
+- Windows installer собирается в GitHub Actions на Windows runner, локально на Linux он не собирается.
+

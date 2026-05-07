@@ -5,7 +5,7 @@ from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from app.client_page import build_data_upload_url, render_local_upload_page
@@ -22,8 +22,8 @@ from app.models import (
     StatusResponse,
 )
 from app.object_key import build_object_key, normalize_prefix
-from app.storage import StorageError, YandexStorageClient, upload_bytes_to_presigned_url
-from app.upload_tokens import UploadTokenStore
+from app.storage import StorageError, YandexStorageClient, upload_bytes_via_client
+from app.upload_tokens import DownloadTokenStore, UploadTokenStore
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -39,6 +39,7 @@ class AppState:
             self.config = AppConfig()
             self.config_error = str(exc)
         self.tokens = UploadTokenStore()
+        self.downloads = DownloadTokenStore()
 
     def update_config(self, payload: ConfigPayload) -> AppConfig:
         incoming = AppConfig.from_mapping(model_to_dict(payload))
@@ -135,27 +136,35 @@ async def presign_upload(payload: PresignUploadRequest, request: Request) -> Pre
     )
     content_type = (payload.content_type or payload.expected_file_type or "").strip()
     expected_file_type = (payload.expected_file_type or "").strip()
-    upload_url = state.storage().presign_upload(object_key, payload.expires_in, content_type=content_type)
+    upload_url = ""
+    client_data_url = ""
+    if state.config.uses_legacy_static_keys:
+        upload_url = state.storage().presign_upload(object_key, payload.expires_in, content_type=content_type)
+        client_data_url = build_data_upload_url(upload_url, content_type=content_type, expected_file_type=expected_file_type)
     token = state.tokens.create(
         object_key,
-        upload_url,
         payload.expires_in,
         content_type=content_type,
         expected_file_type=expected_file_type,
+        max_size_bytes=payload.max_size_bytes,
     )
     client_url = str(request.url_for("local_upload_page", token=token.token))
     return PresignUploadResponse(
         object_key=object_key,
         upload_url=upload_url,
         client_url=client_url,
-        client_data_url=build_data_upload_url(upload_url, content_type=content_type, expected_file_type=expected_file_type),
+        client_data_url=client_data_url,
         expires_at=token.expires_at,
     )
 
 
 @app.post("/api/objects/presign-download", response_model=PresignDownloadResponse)
-async def presign_download(payload: PresignDownloadRequest) -> PresignDownloadResponse:
-    url = state.storage().presign_download(payload.object_key, payload.expires_in)
+async def presign_download(payload: PresignDownloadRequest, request: Request) -> PresignDownloadResponse:
+    if state.config.uses_legacy_static_keys:
+        url = state.storage().presign_download(payload.object_key, payload.expires_in)
+    else:
+        token = state.downloads.create(payload.object_key, payload.expires_in)
+        url = str(request.url_for("local_download", token=token.token))
     expires_at = datetime.now(UTC) + timedelta(seconds=payload.expires_in)
     return PresignDownloadResponse(object_key=payload.object_key, download_url=url, expires_at=expires_at)
 
@@ -192,9 +201,26 @@ async def local_upload_submit(token: str, file: UploadFile = File(...)) -> Statu
         raise HTTPException(status_code=400, detail="Файл пустой")
     if record.expected_file_type and not _matches_mime(file.content_type or "", record.expected_file_type):
         raise HTTPException(status_code=400, detail="Выбран файл неподходящего типа")
-    upload_bytes_to_presigned_url(record.upload_url, data, content_type=record.content_type or file.content_type or "")
+    if record.max_size_bytes and len(data) > record.max_size_bytes:
+        raise HTTPException(status_code=413, detail=f"Файл больше разрешённого лимита: {record.max_size_bytes} байт")
+    upload_bytes_via_client(state.storage(), record.object_key, data, content_type=record.content_type or file.content_type or "")
     state.tokens.mark_used(token)
     return StatusResponse(ok=True, message="Файл загружен")
+
+
+@app.get("/download/{token}", name="local_download", include_in_schema=False)
+async def local_download(token: str) -> Response:
+    record = state.downloads.get(token)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Download token недействителен или истёк")
+    result = state.storage().download_object(record.object_key)
+    state.downloads.mark_used(token)
+    filename = result.filename.replace("\\", "_").replace("/", "_").replace('"', "_") or "download"
+    return Response(
+        result.data,
+        media_type=result.content_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 def _matches_mime(actual: str, expected: str) -> bool:

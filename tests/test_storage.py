@@ -3,8 +3,8 @@ from datetime import datetime
 import pytest
 from botocore.exceptions import ClientError
 
-from app.config import AppConfig
-from app.storage import StorageError, YandexStorageClient
+from app.config import AppConfig, AuthMode
+from app.storage import LegacyStaticStorageBackend, StorageError, _parse_list_objects
 
 
 class FakeClient:
@@ -35,13 +35,14 @@ class FakeClient:
 
 
 def configured_client(monkeypatch):
-    client = YandexStorageClient(
+    client = LegacyStaticStorageBackend(
         AppConfig(
             access_key_id="access",
             secret_key="secret",
             bucket="bucket",
             endpoint="https://storage.yandexcloud.net",
             region="ru-central1",
+            auth_mode=AuthMode.LEGACY_STATIC.value,
         )
     )
     monkeypatch.setattr(client, "_client", lambda: FakeClient())
@@ -74,6 +75,24 @@ def test_connection_error_is_safe(monkeypatch):
     monkeypatch.setattr(client, "_client", lambda: FailingClient())
     with pytest.raises(StorageError) as exc_info:
         client.test_connection()
-    assert "Forbidden" in str(exc_info.value)
+    assert "доступ запрещён" in str(exc_info.value)
     assert "secret" not in str(exc_info.value)
 
+
+def test_parse_list_objects_xml_from_iam_http_api():
+    xml = b"""<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Contents>
+    <Key>incoming/file.txt</Key>
+    <LastModified>2026-01-01T12:00:00.000Z</LastModified>
+    <ETag>"etag"</ETag>
+    <Size>42</Size>
+    <StorageClass>STANDARD</StorageClass>
+  </Contents>
+</ListBucketResult>"""
+
+    objects = _parse_list_objects(xml)
+
+    assert objects[0].key == "incoming/file.txt"
+    assert objects[0].size == 42
+    assert objects[0].etag == "etag"

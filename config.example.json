@@ -1,9 +1,14 @@
 {
-  "access_key_id": "YANDEX_ACCESS_KEY_ID",
-  "secret_key": "YANDEX_SECRET_KEY",
+  "version": 2,
+  "auth_mode": "yc_cli",
+  "yc_profile": "",
+  "service_account_key_path": "",
   "bucket": "my-bucket",
   "prefix": "incoming",
+  "region": "ru-central1",
   "endpoint": "https://storage.yandexcloud.net",
-  "region": "ru-central1"
+  "upload_server_bind_host": "127.0.0.1",
+  "upload_server_port": 8765,
+  "public_base_url": "http://127.0.0.1:8765",
+  "debug": false
 }
-
