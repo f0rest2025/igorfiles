@@ -1,16 +1,16 @@
 :root {
-  --bg: #f3f5f7;
+  --bg: #f2f5f1;
   --surface: #ffffff;
-  --surface-soft: #f8fafc;
-  --border: #d8dee8;
-  --text: #182236;
-  --muted: #657286;
-  --accent: #155eef;
-  --accent-dark: #0f49bd;
+  --surface-soft: #f7faf7;
+  --border: #d6ded8;
+  --text: #1d2a23;
+  --muted: #66746b;
+  --accent: #2f7d5b;
+  --accent-dark: #276849;
   --danger: #b42318;
-  --ok: #137b38;
+  --ok: #18734a;
   --warn: #9a6700;
-  --shadow: 0 14px 34px rgba(15, 23, 42, .08);
+  --shadow: 0 14px 34px rgba(31, 45, 36, .09);
 }
 
 * {
@@ -33,6 +33,7 @@ body {
   padding: 22px clamp(16px, 3vw, 34px);
   border-bottom: 1px solid var(--border);
   background: var(--surface);
+  box-shadow: 0 1px 0 rgba(31, 45, 36, .03);
 }
 
 h1 {
@@ -102,7 +103,7 @@ button.secondary {
 
 button.secondary:hover,
 .tab:hover {
-  background: #eef4ff;
+  background: #e6f0ea;
 }
 
 button.danger {
@@ -122,8 +123,8 @@ button.danger:hover {
 }
 
 .tab.active {
-  background: var(--text);
-  border-color: var(--text);
+  background: var(--accent);
+  border-color: var(--accent);
   color: #fff;
 }
 
@@ -178,7 +179,7 @@ textarea {
 input:focus,
 select:focus,
 textarea:focus {
-  outline: 3px solid #d9e6ff;
+  outline: 3px solid #dbece3;
   border-color: var(--accent);
 }
 
@@ -324,4 +325,3 @@ td.actions-cell .row-actions {
     padding: 14px;
   }
 }
-

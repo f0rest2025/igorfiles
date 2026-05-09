@@ -14,15 +14,16 @@ def render_local_upload_page(token: str, expires_at: str) -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Загрузка файла</title>
   <style>
-    :root {{ color-scheme: light; --border:#d7dde5; --text:#172033; --muted:#5f6b7a; --accent:#1463ff; --ok:#137b38; --err:#b42318; }}
+    :root {{ color-scheme: light; --border:#d5ded7; --text:#1d2a23; --muted:#66746b; --accent:#2f7d5b; --accent-dark:#276849; --ok:#18734a; --err:#b42318; }}
     * {{ box-sizing: border-box; }}
-    body {{ margin: 0; min-height: 100vh; font-family: system-ui, -apple-system, Segoe UI, sans-serif; background: #f4f6f8; color: var(--text); display: grid; place-items: center; padding: 24px; }}
-    main {{ width: min(520px, 100%); background: #fff; border: 1px solid var(--border); border-radius: 8px; padding: 24px; box-shadow: 0 12px 36px rgba(20, 30, 45, .08); }}
+    body {{ margin: 0; min-height: 100vh; font-family: system-ui, -apple-system, Segoe UI, sans-serif; background: #f2f5f1; color: var(--text); display: grid; place-items: center; padding: 24px; }}
+    main {{ width: min(520px, 100%); background: #fff; border: 1px solid var(--border); border-radius: 8px; padding: 24px; box-shadow: 0 14px 36px rgba(31, 45, 36, .10); }}
     h1 {{ margin: 0 0 8px; font-size: 24px; line-height: 1.2; letter-spacing: 0; }}
     p {{ margin: 0 0 18px; color: var(--muted); line-height: 1.45; }}
     label {{ display: block; font-size: 14px; margin-bottom: 8px; }}
     input[type=file] {{ width: 100%; border: 1px solid var(--border); border-radius: 6px; padding: 12px; background: #fff; }}
     button {{ margin-top: 16px; width: 100%; min-height: 44px; border: 0; border-radius: 6px; background: var(--accent); color: #fff; font-weight: 650; cursor: pointer; }}
+    button:hover {{ background: var(--accent-dark); }}
     button:disabled {{ opacity: .55; cursor: wait; }}
     progress {{ width: 100%; height: 12px; margin-top: 14px; }}
     .status {{ min-height: 22px; margin-top: 14px; font-size: 14px; }}
@@ -66,12 +67,13 @@ def render_local_upload_page(token: str, expires_at: str) -> str:
       xhr.upload.onprogress = (progressEvent) => {{
         if (!progressEvent.lengthComputable) return;
         const percent = Math.round((progressEvent.loaded / progressEvent.total) * 100);
-        progress.value = percent;
-        statusBox.textContent = 'Передача файла в приложение: ' + percent + '%';
+        const overallPercent = Math.min(45, Math.round(percent * 0.45));
+        progress.value = overallPercent;
+        statusBox.textContent = 'Загрузка: ' + overallPercent + '% (передача файла в приложение)';
       }};
       xhr.upload.onload = () => {{
         progress.removeAttribute('value');
-        statusBox.textContent = 'Файл передан. Идёт загрузка в Object Storage...';
+        statusBox.textContent = 'Файл принят приложением. Идёт загрузка в Object Storage...';
       }};
       xhr.onload = () => {{
         let data = {{}};
@@ -115,14 +117,15 @@ def render_presigned_upload_page(upload_url: str, content_type: str = "", expect
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Загрузка файла</title>
   <style>
-    :root {{ color-scheme: light; --border:#d7dde5; --text:#172033; --muted:#5f6b7a; --accent:#1463ff; --ok:#137b38; --err:#b42318; }}
+    :root {{ color-scheme: light; --border:#d5ded7; --text:#1d2a23; --muted:#66746b; --accent:#2f7d5b; --accent-dark:#276849; --ok:#18734a; --err:#b42318; }}
     * {{ box-sizing: border-box; }}
-    body {{ margin: 0; min-height: 100vh; font-family: system-ui, -apple-system, Segoe UI, sans-serif; background: #f4f6f8; color: var(--text); display: grid; place-items: center; padding: 24px; }}
-    main {{ width: min(520px, 100%); background: #fff; border: 1px solid var(--border); border-radius: 8px; padding: 24px; box-shadow: 0 12px 36px rgba(20, 30, 45, .08); }}
+    body {{ margin: 0; min-height: 100vh; font-family: system-ui, -apple-system, Segoe UI, sans-serif; background: #f2f5f1; color: var(--text); display: grid; place-items: center; padding: 24px; }}
+    main {{ width: min(520px, 100%); background: #fff; border: 1px solid var(--border); border-radius: 8px; padding: 24px; box-shadow: 0 14px 36px rgba(31, 45, 36, .10); }}
     h1 {{ margin: 0 0 8px; font-size: 24px; line-height: 1.2; letter-spacing: 0; }}
     p {{ margin: 0 0 18px; color: var(--muted); line-height: 1.45; }}
     input[type=file] {{ width: 100%; border: 1px solid var(--border); border-radius: 6px; padding: 12px; background: #fff; }}
     button {{ margin-top: 16px; width: 100%; min-height: 44px; border: 0; border-radius: 6px; background: var(--accent); color: #fff; font-weight: 650; cursor: pointer; }}
+    button:hover {{ background: var(--accent-dark); }}
     button:disabled {{ opacity: .55; cursor: wait; }}
     progress {{ width: 100%; height: 12px; margin-top: 14px; }}
     .status {{ min-height: 22px; margin-top: 14px; font-size: 14px; }}
@@ -172,8 +175,13 @@ def render_presigned_upload_page(upload_url: str, content_type: str = "", expect
       xhr.upload.onprogress = (event) => {{
         if (!event.lengthComputable) return;
         const percent = Math.round((event.loaded / event.total) * 100);
-        progress.value = percent;
-        statusBox.textContent = 'Загрузка: ' + percent + '%';
+        const visiblePercent = Math.min(95, percent);
+        progress.value = visiblePercent;
+        if (percent >= 100) {{
+          statusBox.textContent = 'Файл передан. Object Storage завершает загрузку...';
+        }} else {{
+          statusBox.textContent = 'Загрузка: ' + visiblePercent + '%';
+        }}
       }};
       xhr.onload = () => {{
         if (xhr.status < 200 || xhr.status >= 300) {{

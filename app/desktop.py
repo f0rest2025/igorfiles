@@ -43,24 +43,34 @@ class DesktopApp(tk.Tk):
             style.theme_use("clam")
         except tk.TclError:
             pass
-        self.configure(background="#ffffff")
-        style.configure("TFrame", background="#ffffff")
-        style.configure("Panel.TFrame", background="#ffffff")
-        style.configure("Toolbar.TFrame", background="#ffffff")
-        style.configure("TLabel", background="#ffffff", foreground="#1f2937")
-        style.configure("Panel.TLabel", background="#ffffff", foreground="#1f2937")
-        style.configure("Muted.TLabel", background="#ffffff", foreground="#667085")
+        bg = "#f2f5f1"
+        panel = "#ffffff"
+        text = "#1d2a23"
+        muted = "#66746b"
+        border_soft = "#d6ded8"
+        accent = "#2f7d5b"
+        accent_dark = "#276849"
+        self.configure(background=bg)
+        style.configure("TFrame", background=bg)
+        style.configure("Panel.TFrame", background=panel)
+        style.configure("Toolbar.TFrame", background=panel)
+        style.configure("TLabel", background=bg, foreground=text)
+        style.configure("Panel.TLabel", background=panel, foreground=text)
+        style.configure("Muted.TLabel", background=bg, foreground=muted)
         style.configure("TButton", padding=(12, 7), borderwidth=0)
-        style.map("TButton", background=[("active", "#e8eef8")])
-        style.configure("Primary.TButton", padding=(14, 8), foreground="#ffffff", background="#2563eb")
-        style.map("Primary.TButton", background=[("active", "#1d4ed8"), ("disabled", "#93a4c7")])
-        style.configure("Ghost.TButton", padding=(12, 7), foreground="#344054", background="#ffffff")
+        style.map("TButton", background=[("active", "#dfece5")])
+        style.configure("Primary.TButton", padding=(14, 8), foreground="#ffffff", background=accent)
+        style.map("Primary.TButton", background=[("active", accent_dark), ("disabled", "#9bb3a5")])
+        style.configure("Ghost.TButton", padding=(12, 7), foreground="#34443a", background=panel)
         style.configure("Danger.TButton", foreground="#b42318", background="#ffffff")
-        style.configure("TNotebook", background="#ffffff", borderwidth=0)
-        style.configure("TNotebook.Tab", padding=(16, 9), background="#edf1f7", foreground="#475467")
-        style.map("TNotebook.Tab", background=[("selected", "#ffffff")], foreground=[("selected", "#111827")])
-        style.configure("Treeview", rowheight=30, background="#ffffff", fieldbackground="#ffffff", borderwidth=0)
-        style.configure("Treeview.Heading", font=("TkDefaultFont", 9, "bold"), background="#f2f4f7", foreground="#344054")
+        style.configure("TNotebook", background=bg, borderwidth=0)
+        style.configure("TNotebook.Tab", padding=(16, 9), background="#e5ece7", foreground="#4a5a50")
+        style.map("TNotebook.Tab", background=[("selected", panel)], foreground=[("selected", text)])
+        style.configure("Treeview", rowheight=30, background=panel, fieldbackground=panel, borderwidth=0)
+        style.configure("Treeview.Heading", font=("TkDefaultFont", 9, "bold"), background="#e9efeb", foreground="#34443a")
+        style.configure("TEntry", fieldbackground=panel, bordercolor=border_soft, lightcolor=border_soft, darkcolor=border_soft)
+        style.configure("TCombobox", fieldbackground=panel, bordercolor=border_soft, arrowcolor=accent)
+        style.configure("Horizontal.TProgressbar", troughcolor="#e5ece7", background=accent, bordercolor=border_soft, lightcolor=accent, darkcolor=accent)
 
     def clear_root(self) -> None:
         for child in self.winfo_children():
@@ -186,11 +196,12 @@ class MainFrame(ttk.Frame):
         _grid_entry(form, "Bucket", self.bucket, 1, 0)
         _grid_entry(form, "Prefix", self.prefix, 1, 1)
         _grid_entry(form, "Endpoint", self.endpoint, 2, 0)
-        _grid_entry(form, "Yandex CLI profile", self.yc_profile, 2, 1)
-        _grid_entry(form, "Service account JSON path", self.service_account_key_path, 3, 0)
-        ttk.Button(form, text="Выбрать JSON", command=self.choose_service_account_json).grid(row=3, column=1, sticky="w", padx=8, pady=(25, 7))
-        _grid_entry(form, "Legacy Access Key ID", self.access_key_id, 4, 0)
-        _grid_entry(form, "Legacy Secret Key", self.secret_key, 4, 1, show="*")
+        self.yc_profile_group = _grid_entry(form, "Yandex CLI profile", self.yc_profile, 2, 1)
+        self.service_account_group = _grid_entry(form, "Service account JSON path", self.service_account_key_path, 3, 0)
+        self.service_json_button = ttk.Button(form, text="Выбрать JSON", command=self.choose_service_account_json)
+        self.service_json_button.grid(row=3, column=1, sticky="w", padx=8, pady=(25, 7))
+        self.legacy_access_group = _grid_entry(form, "Legacy Access Key ID", self.access_key_id, 4, 0)
+        self.legacy_secret_group = _grid_entry(form, "Legacy Secret Key", self.secret_key, 4, 1, show="*")
         _grid_entry(form, "Upload server bind host", self.upload_server_bind_host, 5, 0)
         _grid_entry(form, "Upload server port", self.upload_server_port, 5, 1)
         _grid_entry(form, "Public base URL для client links", self.public_base_url, 6, 0)
@@ -206,6 +217,7 @@ class MainFrame(ttk.Frame):
         self.auth_hint = tk.StringVar()
         ttk.Label(tab, textvariable=self.auth_hint, foreground="#5f6b7a", wraplength=900).pack(anchor="w", pady=(8, 0))
         ttk.Label(tab, textvariable=self.status_connection, foreground="#5f6b7a").pack(anchor="w")
+        self.update_auth_fields()
 
     def _files_tab(self) -> None:
         tab = ttk.Frame(self.notebook, padding=20, style="Panel.TFrame")
@@ -389,6 +401,18 @@ class MainFrame(ttk.Frame):
         else:
             text = "Legacy static access key mode: оставлен только для совместимости. Он использует S3 signing/presigned URLs и менее надёжен."
         self.auth_hint.set(f"{auth_mode_label(mode)}. {text}")
+        self.update_auth_fields()
+
+    def update_auth_fields(self) -> None:
+        if not hasattr(self, "yc_profile_group"):
+            return
+        mode = self.auth_mode.get()
+        yc_widgets = [self.yc_profile_group]
+        service_widgets = [self.service_account_group, self.service_json_button]
+        legacy_widgets = [self.legacy_access_group, self.legacy_secret_group]
+        _set_grid_visible(yc_widgets, mode == AuthMode.YC_CLI.value)
+        _set_grid_visible(service_widgets, mode == AuthMode.SERVICE_ACCOUNT_JSON.value)
+        _set_grid_visible(legacy_widgets, mode == AuthMode.LEGACY_STATIC.value)
 
     def apply_config(self) -> None:
         try:
@@ -622,9 +646,15 @@ class MainFrame(ttk.Frame):
             total = total or total_size
 
             def update() -> None:
-                percent = min(100, int((done / total) * 100)) if total else 0
-                self.direct_progress.configure(value=percent)
-                self.status_direct.set(f"Загрузка в Object Storage: {percent}% ({_format_size(done)} / {_format_size(total)})")
+                raw_percent = min(100, int((done / total) * 100)) if total else 0
+                visible_percent = min(95, raw_percent)
+                self.direct_progress.configure(value=visible_percent)
+                if raw_percent >= 100:
+                    self.status_direct.set("Файл передан. Object Storage завершает загрузку...")
+                else:
+                    self.status_direct.set(
+                        f"Загрузка в Object Storage: {visible_percent}% ({_format_size(done)} / {_format_size(total)})"
+                    )
 
             self.app.after(0, update)
 
@@ -682,6 +712,14 @@ def _grid_entry(parent, label: str, variable: tk.StringVar, row: int, column: in
 def _set_text(widget: ScrolledText, value: str) -> None:
     widget.delete("1.0", "end")
     widget.insert("1.0", value)
+
+
+def _set_grid_visible(widgets: list[tk.Widget], visible: bool) -> None:
+    for widget in widgets:
+        if visible:
+            widget.grid()
+        else:
+            widget.grid_remove()
 
 
 def _read_int(value: str, label: str) -> int:

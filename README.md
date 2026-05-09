@@ -69,6 +69,7 @@ Legacy direct browser upload больше не отдаётся как `data:` U
 - retries включены через botocore standard retry mode.
 
 Operator direct upload не читает весь файл в память. Client upload через локальный backend сначала сохраняет входящий файл во временный файл на диск, затем отправляет этот temp file в Object Storage через тот же multipart path. В desktop GUI для прямой загрузки есть progress bar; клиентская upload-страница показывает прогресс передачи файла в локальное приложение и отдельный статус загрузки в Object Storage.
+Для client upload 100% на индикаторе показывается только после полного завершения загрузки в Object Storage: передача файла в локальное приложение отображается как отдельная первая фаза.
 
 ## Регион
 
@@ -101,14 +102,14 @@ Operator direct upload не читает весь файл в память. Clie
 
 ```bash
 git push origin main
-git tag v0.4.3
-git push origin v0.4.3
+git tag v0.4.4
+git push origin v0.4.4
 ```
 
 После сборки в GitHub Releases появится:
 
 ```text
-YandexStorageManagerSetup-0.4.3.exe
+YandexStorageManagerSetup-0.4.4.exe
 ```
 
 ## Запуск из исходников
